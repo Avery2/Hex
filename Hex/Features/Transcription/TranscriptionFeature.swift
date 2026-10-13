@@ -25,6 +25,8 @@ struct TranscriptionFeature {
     var error: String?
     var recordingStartTime: Date?
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
+    /// What the mic levels say about whether words are actually being captured.
+    var speech = SpeechActivityDetector()
     var sourceAppBundleID: String?
     var sourceAppName: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
@@ -94,6 +96,7 @@ struct TranscriptionFeature {
 
       case let .audioLevelUpdated(meter):
         state.meter = meter
+        state.speech.ingest(averagePower: meter.averagePower, peakPower: meter.peakPower)
         return .none
 
       // MARK: - HotKey Flow
@@ -300,6 +303,7 @@ private extension TranscriptionFeature {
     state.isRecording = true
     let startTime = now
     state.recordingStartTime = startTime
+    state.speech.reset()
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -705,7 +709,9 @@ struct TranscriptionView: View {
   var body: some View {
     TranscriptionIndicatorView(
       status: status,
-      meter: store.meter
+      meter: store.meter,
+      speech: store.speech,
+      recordingStartedAt: store.recordingStartTime
     )
     .task {
       await store.send(.task).finish()
