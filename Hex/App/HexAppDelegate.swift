@@ -19,6 +19,8 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		DiagnosticsLogging.bootstrapIfNeeded()
 		// Ensure Parakeet/FluidAudio caches live under Application Support, not ~/.cache
 		configureLocalCaches()
+		// Reclaim recordings stranded by crashes, force quits, or a stop that never arrived.
+		cleanUpOrphanedRecordings()
 		if isTesting {
 			appLogger.debug("Running in testing mode")
 			return
@@ -99,6 +101,20 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
             cacheLogger.error("Failed to configure local caches: \(error.localizedDescription)")
         }
     }
+
+	/// Recordings are written to the temp directory and normally moved into history once they
+	/// finish, but abandoned ones were never deleted and accumulated indefinitely — one container
+	/// reached 1.3 GB across 1044 files, including a six-hour recording that never stopped.
+	/// Swept on launch and off the main thread, so startup is not delayed.
+	private func cleanUpOrphanedRecordings() {
+		Task.detached(priority: .background) {
+			let result = OrphanedRecordingCleanup.run(in: FileManager.default.temporaryDirectory)
+			guard result.files > 0 else { return }
+			cacheLogger.notice(
+				"Removed \(result.files) orphaned recording(s), reclaiming \(result.bytes) bytes"
+			)
+		}
+	}
 
 	func presentMainView() {
 		guard invisibleWindow == nil else {
