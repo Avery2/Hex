@@ -80,7 +80,15 @@ actor ParakeetClient {
     // Download + load the requested variant (returns when all assets are present)
     let models = try await AsrModels.downloadAndLoad(version: variant.asrVersion)
     self.models = models
-    let manager = AsrManager(config: .init(), models: models)
+    // Opt out of FluidAudio's disk-backed "streaming" path, which it switches to for audio
+    // longer than `streamingThreshold` (480,000 samples ≈ 30s at 16kHz). That path converts
+    // the file to a temporary `.raw` buffer through a streaming AVAudioConverter and then
+    // memory-maps it, and it is where long Hex recordings lose their tail: one measured
+    // 128s dictation had 3.5s of speech right up to 0.25s before the end of the file, and
+    // none of it reached the transcript, while sub-30s recordings (in-memory path) all ended
+    // cleanly. Transcribing from memory costs ~14 MB for a four-minute recording, which is
+    // not worth trading words for.
+    let manager = AsrManager(config: ASRConfig(streamingEnabled: false), models: models)
     self.asr = manager
     self.currentVariant = variant
     p.completedUnitCount = 100
