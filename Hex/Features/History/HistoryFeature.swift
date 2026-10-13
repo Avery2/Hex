@@ -231,11 +231,16 @@ struct TranscriptView: View {
 		case .pasted: return nil
 		case .notPasted: return "NOT PASTED"
 		case .failed: return "FAILED"
+		case .recovered: return "RECOVERED"
 		}
 	}
 
 	private var statusBadgeColor: Color {
-		transcript.status == .failed ? .orange : .secondary
+		switch transcript.status {
+		case .failed: return .orange
+		case .recovered: return .blue
+		case .pasted, .notPasted: return .secondary
+		}
 	}
 
 	/// Failed transcriptions keep the audio but have no text, which would otherwise render

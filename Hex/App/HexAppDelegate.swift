@@ -19,8 +19,13 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		DiagnosticsLogging.bootstrapIfNeeded()
 		// Ensure Parakeet/FluidAudio caches live under Application Support, not ~/.cache
 		configureLocalCaches()
-		// Reclaim recordings stranded by crashes, force quits, or a stop that never arrived.
-		cleanUpOrphanedRecordings()
+		// Find recordings stranded by an earlier crash or force quit, and clear out the empty
+		// files those aborted sessions leave behind. Collected here, ahead of the hotkey
+		// monitor, so no recording can be in flight and every file found is a leftover.
+		let strandedRecordings = StrandedRecordingRecovery.collect(
+			in: FileManager.default.temporaryDirectory,
+			before: Date()
+		)
 		if isTesting {
 			appLogger.debug("Running in testing mode")
 			return
@@ -53,6 +58,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 
 		// Start long-running app effects (global hotkeys, permissions, etc.)
 		startLifecycleTasksIfNeeded()
+
+		// Handed to the store rather than transcribed here, so the words land in history.
+		recoverStrandedRecordings(strandedRecordings)
 
 		// Then present main views
 		presentMainView()
@@ -102,18 +110,10 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-	/// Recordings are written to the temp directory and normally moved into history once they
-	/// finish, but abandoned ones were never deleted and accumulated indefinitely — one container
-	/// reached 1.3 GB across 1044 files, including a six-hour recording that never stopped.
-	/// Swept on launch and off the main thread, so startup is not delayed.
-	private func cleanUpOrphanedRecordings() {
-		Task.detached(priority: .background) {
-			let result = OrphanedRecordingCleanup.run(in: FileManager.default.temporaryDirectory)
-			guard result.files > 0 else { return }
-			cacheLogger.notice(
-				"Removed \(result.files) orphaned recording(s), reclaiming \(result.bytes) bytes"
-			)
-		}
+	private func recoverStrandedRecordings(_ recordings: [StrandedRecordingRecovery.StrandedRecording]) {
+		guard !recordings.isEmpty else { return }
+		appLogger.notice("Recovering \(recordings.count) recording(s) stranded by a previous session")
+		HexApp.appStore.send(.recoverStrandedRecordings(recordings))
 	}
 
 	func presentMainView() {

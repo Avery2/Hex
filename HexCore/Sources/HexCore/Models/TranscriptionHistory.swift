@@ -13,6 +13,9 @@ public enum TranscriptStatus: String, Codable, Equatable, Sendable {
     case notPasted
     /// Transcription failed. The audio is kept so nothing that was said is lost.
     case failed
+    /// Recovered from a previous session that ended without finishing it — a crash or force
+    /// quit. Kept so the words survive an interrupted session.
+    case recovered
 
     public var wasPasted: Bool { self == .pasted }
 }

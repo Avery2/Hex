@@ -47,6 +47,8 @@ struct AppFeature {
     case setActiveTab(ActiveTab)
     case task
     case pasteLastTranscript
+    /// Recordings found in the temp directory that a previous session abandoned.
+    case recoverStrandedRecordings([StrandedRecordingRecovery.StrandedRecording])
 
     // Permission actions
     case checkPermissions
@@ -87,6 +89,9 @@ struct AppFeature {
           startPermissionMonitoring()
         )
         
+      case let .recoverStrandedRecordings(recordings):
+        return .send(.transcription(.recoverStrandedRecordings(recordings)))
+
       case .pasteLastTranscript:
         @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
         guard let lastTranscript = transcriptionHistory.history.first?.text else {

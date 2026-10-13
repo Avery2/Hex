@@ -53,6 +53,8 @@ struct TranscriptionFeature {
 
     // Transcription result flow
     case transcribe(URL, TimeInterval, TranscriptStatus)
+    /// Recordings a previous session left behind, to be transcribed into history.
+    case recoverStrandedRecordings([StrandedRecordingRecovery.StrandedRecording])
     case transcriptionResult(String, URL, TimeInterval, TranscriptStatus)
     case transcriptionError(Error, URL?, TimeInterval)
 
@@ -120,6 +122,14 @@ struct TranscriptionFeature {
         return handleStopRecording(&state)
 
       // MARK: - Transcription Results
+
+      case let .recoverStrandedRecordings(recordings):
+        guard !recordings.isEmpty else { return .none }
+        return .merge(
+          recordings.map { recording in
+            .send(.transcribe(recording.url, recording.duration, .recovered))
+          }
+        )
 
       case let .transcribe(audioURL, duration, status):
         // Set here rather than at the call sites so the cancel path shows the same
@@ -406,6 +416,9 @@ private extension TranscriptionFeature {
   ///
   /// Shared by the normal stop path and the cancel path, so cancelling produces a
   /// recoverable transcript rather than a deleted file.
+  /// Transcribes a recording a previous session abandoned. Nothing is pasted — the user is
+  /// not necessarily in the same app, or even the same hour — but the words land in history
+  /// so an interrupted session does not lose them.
   func transcribeEffect(url: URL, duration: TimeInterval, status: TranscriptStatus) -> Effect<Action> {
     .run { send in
       @Shared(.hexSettings) var hexSettings: HexSettings
