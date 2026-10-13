@@ -23,10 +23,12 @@ struct TranscriptionIndicatorView: View {
 
   var status: Status
   var meter: Meter
-  /// What the mic levels say about whether words are actually being captured.
+  /// Used only to tell a dead microphone from a quiet room, which the level meter cannot.
   var speech: SpeechActivityDetector = .init()
   /// When the current recording started; used to decide when silence is worth mentioning.
   var recordingStartedAt: Date?
+  /// What the transcriber is hearing so far, shown while you are still speaking.
+  var liveText: String = ""
 
   let transcribeBaseColor: Color = .blue
   private var backgroundColor: Color {
@@ -40,23 +42,11 @@ struct TranscriptionIndicatorView: View {
     }
   }
 
-  /// The outline carries the capture verdict, which is deliberately a different channel from
-  /// the fill's loudness: loudness alone can't tell a quiet room from a dead microphone, and
-  /// it says nothing about whether the transcriber can make words out of what it hears.
-  private var captureColor: Color {
-    switch speech.quality {
-    case .waiting: return Color.white.opacity(0.25)
-    case .good: return .green
-    case .tooQuiet: return .yellow
-    case .clipping: return .orange
-    }
-  }
-
   private var strokeColor: Color {
     switch status {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.black
-    case .recording: return captureColor
+    case .recording: return mixedColor(.red, with: .white, by: 0.1).opacity(0.6)
     case .transcribing: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     case .prewarming: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     }
@@ -89,18 +79,12 @@ struct TranscriptionIndicatorView: View {
     status == .hidden
   }
 
-  /// Text worth showing only when something needs fixing, so the indicator stays tiny.
+  /// Nothing speech-like for a couple of seconds of recording is nearly always the microphone
+  /// (wrong device, muted, unplugged) rather than a quiet room. Only fires when nothing has
+  /// been heard at all, so pausing mid-sentence never triggers it.
   private var hint: String? {
-    switch speech.quality {
-    case .tooQuiet: return "Too quiet"
-    case .clipping: return "Clipping"
-    case .good: return nil
-    case .waiting:
-      // Nothing speech-like for a couple of seconds of recording is nearly always the
-      // microphone (wrong device, muted, unplugged) rather than a quiet room.
-      guard status == .recording, let startedAt = recordingStartedAt else { return nil }
-      return Date().timeIntervalSince(startedAt) > 2.5 ? "Not hearing you" : nil
-    }
+    guard status == .recording, !speech.hasSpoken, let startedAt = recordingStartedAt else { return nil }
+    return Date().timeIntervalSince(startedAt) > 2.5 ? "Not hearing you" : nil
   }
 
   @State var transcribeEffect = 0
@@ -113,7 +97,7 @@ struct TranscriptionIndicatorView: View {
         .fill(backgroundColor.shadow(.inner(color: innerShadowColor, radius: 4)))
         .overlay {
           Capsule()
-            .stroke(strokeColor, lineWidth: status == .recording ? 1.5 : 1)
+            .stroke(strokeColor, lineWidth: 1)
             .blendMode(.screen)
         }
         .overlay(alignment: .center) {
@@ -150,12 +134,6 @@ struct TranscriptionIndicatorView: View {
           color: status == .recording ? .red.opacity(averagePower * 0.5) : .red.opacity(0),
           radius: 8
         )
-        // A green halo only while words are actively arriving, so the outline reads as
-        // "I'm getting this" rather than just "something is loud".
-        .shadow(
-          color: status == .recording && speech.isSpeaking ? captureColor.opacity(0.7) : .clear,
-          radius: 6
-        )
         .animation(.interactiveSpring(), value: meter)
         .frame(
           width: status == .recording ? expandedWidth : baseWidth,
@@ -174,8 +152,8 @@ struct TranscriptionIndicatorView: View {
             try? await Task.sleep(for: .seconds(0.25))
           }
         }
-      
-      // Tooltip above the capsule: prewarming status, or a capture problem worth fixing.
+
+      // Tooltip above the capsule: prewarming status, or a dead-microphone warning.
       if let message = status == .prewarming ? "Model prewarming..." : hint {
         VStack(spacing: 4) {
           Text(message)
@@ -192,17 +170,37 @@ struct TranscriptionIndicatorView: View {
         .transition(.opacity)
         .zIndex(2)
       }
+
+      // The words themselves. This is the whole point of the indicator: a level meter and a
+      // colour can only say "something is loud", not "I am getting your words".
+      if status == .recording, !liveText.isEmpty {
+        Text(liveText)
+          .font(.system(size: 13))
+          .foregroundColor(.white)
+          .lineLimit(2)
+          .multilineTextAlignment(.center)
+          .truncationMode(.head)
+          .frame(maxWidth: 460)
+          .padding(.horizontal, 10)
+          .padding(.vertical, 6)
+          .background(
+            RoundedRectangle(cornerRadius: 6)
+              .fill(Color.black.opacity(0.75))
+          )
+          .offset(y: 28)
+          .transition(.opacity)
+          .zIndex(3)
+      }
     }
     .animation(.easeInOut(duration: 0.15), value: hint)
+    .animation(.easeInOut(duration: 0.15), value: liveText.isEmpty)
     .enableInjection()
   }
 }
 
 #Preview("HEX") {
   var speaking = SpeechActivityDetector()
-  speaking.ingest(averagePower: 0.05, peakPower: 0.2)
-  var quiet = SpeechActivityDetector()
-  quiet.ingest(averagePower: 0.006, peakPower: 0.02)
+  speaking.ingest(averagePower: 0.05)
 
   return VStack(spacing: 8) {
     TranscriptionIndicatorView(status: .hidden, meter: .init(averagePower: 0, peakPower: 0))
@@ -210,12 +208,8 @@ struct TranscriptionIndicatorView: View {
     TranscriptionIndicatorView(
       status: .recording,
       meter: .init(averagePower: 0.5, peakPower: 0.5),
-      speech: speaking
-    )
-    TranscriptionIndicatorView(
-      status: .recording,
-      meter: .init(averagePower: 0.2, peakPower: 0.3),
-      speech: quiet
+      speech: speaking,
+      liveText: "so what I'm saying is that the tail of the recording keeps getting cut off"
     )
     TranscriptionIndicatorView(
       status: .recording,

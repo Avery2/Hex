@@ -31,6 +31,8 @@ struct RecordingClient {
   var stopRecording: @Sendable () async -> RecordingStopResult = { .ignored(.noActiveRecording) }
   var requestMicrophoneAccess: @Sendable () async -> Bool = { false }
   var observeAudioLevel: @Sendable () async -> AsyncStream<Meter> = { AsyncStream { _ in } }
+  /// Raw 16kHz mono samples while recording, for the live transcription preview.
+  var observeAudioSamples: @Sendable () async -> AsyncStream<[Float]> = { AsyncStream { _ in } }
   var getAvailableInputDevices: @Sendable () async -> [AudioInputDevice] = { [] }
   var getDefaultInputDeviceName: @Sendable () async -> String? = { nil }
   var warmUpRecorder: @Sendable () async -> Void = {}
@@ -48,6 +50,7 @@ extension RecordingClient: DependencyKey {
       stopRecording: { await live.stopRecording() },
       requestMicrophoneAccess: { await live.requestMicrophoneAccess() },
       observeAudioLevel: { await live.observeAudioLevel() },
+      observeAudioSamples: { await live.observeAudioSamples() },
       getAvailableInputDevices: { await live.getAvailableInputDevices() },
       getDefaultInputDeviceName: { await live.getDefaultInputDeviceName() },
       warmUpRecorder: { await live.warmUpRecorder() },
@@ -392,9 +395,15 @@ actor RecordingClientLive {
     AVLinearPCMIsNonInterleaved: false,
   ]
   private let (meterStream, meterContinuation) = AsyncStream<Meter>.makeStream()
+  /// Bounded so an unconsumed preview stream can never grow without limit. The preview
+  /// consumer only appends to a fixed-size window, so it always keeps up in practice.
+  private let (audioSamplesStream, audioSamplesContinuation) = AsyncStream<[Float]>.makeStream(
+    bufferingPolicy: .bufferingNewest(64)
+  )
   private var meterTask: Task<Void, Never>?
   private lazy var captureController = SuperFastCaptureController(
     meterContinuation: meterContinuation,
+    samplesContinuation: audioSamplesContinuation,
     onEngineConfigurationChange: { [weak self] generation in
       Task {
         await self?.enqueueCaptureEnvironmentChange(
@@ -1671,6 +1680,10 @@ actor RecordingClientLive {
 
   func observeAudioLevel() -> AsyncStream<Meter> {
     meterStream
+  }
+
+  func observeAudioSamples() -> AsyncStream<[Float]> {
+    audioSamplesStream
   }
 
   func warmUpRecorder() async {

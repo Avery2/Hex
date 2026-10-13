@@ -106,6 +106,7 @@ final class SuperFastCaptureController {
   private let logger = HexLog.recording
   private let processingQueue = DispatchQueue(label: "com.kitlangton.Hex.SuperFastCapture")
   private let meterContinuation: AsyncStream<Meter>.Continuation
+  private let samplesContinuation: AsyncStream<[Float]>.Continuation
   private let ringBuffer = FloatRingBuffer(
     capacity: Int(SuperFastCaptureConstants.sampleRate * SuperFastCaptureConstants.ringBufferDuration)
   )
@@ -130,9 +131,11 @@ final class SuperFastCaptureController {
 
   init(
     meterContinuation: AsyncStream<Meter>.Continuation,
+    samplesContinuation: AsyncStream<[Float]>.Continuation,
     onEngineConfigurationChange: @escaping @Sendable (Int) -> Void
   ) {
     self.meterContinuation = meterContinuation
+    self.samplesContinuation = samplesContinuation
     self.onEngineConfigurationChange = onEngineConfigurationChange
   }
 
@@ -401,6 +404,9 @@ final class SuperFastCaptureController {
 
     if activeRecording != nil {
       meterContinuation.yield(meter(for: samples, count: sampleCount))
+      // Raw audio for the live preview, which re-decodes a rolling window of it. Copied
+      // because the pointer only lives for the duration of this callback.
+      samplesContinuation.yield(Array(UnsafeBufferPointer(start: samples, count: sampleCount)))
     }
 
     guard var recording = activeRecording else { return }

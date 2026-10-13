@@ -27,6 +27,8 @@ struct TranscriptionFeature {
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
     /// What the mic levels say about whether words are actually being captured.
     var speech = SpeechActivityDetector()
+    /// What the transcriber is hearing so far, shown while you are still speaking.
+    var livePreviewText: String = ""
     var sourceAppBundleID: String?
     var sourceAppName: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
@@ -38,6 +40,7 @@ struct TranscriptionFeature {
   enum Action {
     case task
     case audioLevelUpdated(Meter)
+    case livePreviewUpdated(String)
 
     // Hotkey actions
     case hotKeyPressed
@@ -67,6 +70,7 @@ struct TranscriptionFeature {
     case recordingStart
     case recordingCleanup
     case transcription
+    case livePreview
   }
 
   @Dependency(\.transcription) var transcription
@@ -77,6 +81,7 @@ struct TranscriptionFeature {
   @Dependency(\.sleepManagement) var sleepManagement
   @Dependency(\.date.now) var now
   @Dependency(\.transcriptPersistence) var transcriptPersistence
+  @Dependency(\.livePreview) var livePreview
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -98,7 +103,11 @@ struct TranscriptionFeature {
 
       case let .audioLevelUpdated(meter):
         state.meter = meter
-        state.speech.ingest(averagePower: meter.averagePower, peakPower: meter.peakPower)
+        state.speech.ingest(averagePower: meter.averagePower)
+        return .none
+
+      case let .livePreviewUpdated(text):
+        state.livePreviewText = text
         return .none
 
       // MARK: - HotKey Flow
@@ -275,6 +284,21 @@ private extension TranscriptionFeature {
     }
   }
 
+  /// Streams microphone audio into the preview decoder while the user is speaking, so words
+  /// appear as they are said rather than only after the recording is finished.
+  func livePreviewEffect() -> Effect<Action> {
+    .run { send in
+      await livePreview.begin { text in
+        await send(.livePreviewUpdated(text))
+      }
+      for await samples in await recording.observeAudioSamples() {
+        await livePreview.append(samples)
+      }
+      await livePreview.end()
+    }
+    .cancellable(id: CancelID.livePreview, cancelInFlight: true)
+  }
+
   func warmUpRecorderEffect() -> Effect<Action> {
     .run { _ in
       await recording.warmUpRecorder()
@@ -325,6 +349,7 @@ private extension TranscriptionFeature {
     // Prevent system sleep during recording
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
+      livePreviewEffect(),
       .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
@@ -346,6 +371,7 @@ private extension TranscriptionFeature {
 
   func handleStopRecording(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
+    state.livePreviewText = ""
     
     let stopTime = now
     let startTime = state.recordingStartTime
@@ -383,6 +409,7 @@ private extension TranscriptionFeature {
 
     return .merge(
       .cancel(id: CancelID.recordingStart),
+      .cancel(id: CancelID.livePreview),
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -660,10 +687,12 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
+    state.livePreviewText = ""
 
     return .concatenate(
       .cancel(id: CancelID.transcription),
       .cancel(id: CancelID.recordingStart),
+      .cancel(id: CancelID.livePreview),
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -686,10 +715,12 @@ private extension TranscriptionFeature {
   func handleDiscard(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
     state.isPrewarming = false
+    state.livePreviewText = ""
 
     // Silently discard - no sound effect
     return .merge(
       .cancel(id: CancelID.recordingStart),
+      .cancel(id: CancelID.livePreview),
       .run { [sleepManagement] _ in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -727,7 +758,8 @@ struct TranscriptionView: View {
       status: status,
       meter: store.meter,
       speech: store.speech,
-      recordingStartedAt: store.recordingStartTime
+      recordingStartedAt: store.recordingStartTime,
+      liveText: store.livePreviewText
     )
     .task {
       await store.send(.task).finish()
