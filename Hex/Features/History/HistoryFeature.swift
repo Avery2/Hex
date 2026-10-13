@@ -224,10 +224,45 @@ struct TranscriptView: View {
 	let onCopy: () -> Void
 	let onDelete: () -> Void
 
+	/// Entries that never made it into an app are marked, so a cancelled take is visibly
+/// different from something you actually typed.
+	private var statusBadge: String? {
+		switch transcript.status {
+		case .pasted: return nil
+		case .notPasted: return "NOT PASTED"
+		case .failed: return "FAILED"
+		}
+	}
+
+	private var statusBadgeColor: Color {
+		transcript.status == .failed ? .orange : .secondary
+	}
+
+	/// Failed transcriptions keep the audio but have no text, which would otherwise render
+	/// as a blank row.
+	private var displayText: String {
+		transcript.text.isEmpty ? "No text captured — audio kept" : transcript.text
+	}
+
 	var body: some View {
 		VStack(alignment: .leading, spacing: 0) {
-			Text(transcript.text)
+			if let statusBadge {
+				Text(statusBadge)
+					.font(.caption2.weight(.semibold))
+					.foregroundStyle(statusBadgeColor)
+					.padding(.horizontal, 6)
+					.padding(.vertical, 2)
+					.background(
+						Capsule().strokeBorder(statusBadgeColor.opacity(0.5), lineWidth: 1)
+					)
+					.padding(.leading, 12)
+					.padding(.top, 10)
+			}
+
+			Text(displayText)
 				.font(.body)
+				.italic(transcript.text.isEmpty)
+				.foregroundStyle(transcript.text.isEmpty ? Color.secondary : Color.primary)
 				.lineLimit(nil)
 				.fixedSize(horizontal: false, vertical: true)
 				.padding(.trailing, 40) // Space for buttons

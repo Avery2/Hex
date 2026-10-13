@@ -50,8 +50,9 @@ struct TranscriptionFeature {
     case discard  // Silent discard (too short/accidental)
 
     // Transcription result flow
-    case transcriptionResult(String, URL, TimeInterval)
-    case transcriptionError(Error, URL?)
+    case transcribe(URL, TimeInterval, TranscriptStatus)
+    case transcriptionResult(String, URL, TimeInterval, TranscriptStatus)
+    case transcriptionError(Error, URL?, TimeInterval)
 
     // Model availability
     case modelMissing
@@ -117,11 +118,24 @@ struct TranscriptionFeature {
 
       // MARK: - Transcription Results
 
-      case let .transcriptionResult(result, audioURL, duration):
-        return handleTranscriptionResult(&state, result: result, audioURL: audioURL, duration: duration)
+      case let .transcribe(audioURL, duration, status):
+        // Set here rather than at the call sites so the cancel path shows the same
+        // "transcribing" state as the normal stop path.
+        state.isTranscribing = true
+        state.error = nil
+        return transcribeEffect(url: audioURL, duration: duration, status: status)
 
-      case let .transcriptionError(error, audioURL):
-        return handleTranscriptionError(&state, error: error, audioURL: audioURL)
+      case let .transcriptionResult(result, audioURL, duration, status):
+        return handleTranscriptionResult(
+          &state,
+          result: result,
+          audioURL: audioURL,
+          duration: duration,
+          status: status
+        )
+
+      case let .transcriptionError(error, audioURL, duration):
+        return handleTranscriptionError(&state, error: error, audioURL: audioURL, duration: duration)
 
       case .modelMissing:
         return .none
@@ -347,25 +361,10 @@ private extension TranscriptionFeature {
       return handleDiscard(&state)
     }
 
-    let model = state.hexSettings.selectedModel
-    guard !model.isEmpty else {
-      // Defense-in-depth: handleStartRecording already blocks recording when the
-      // bootstrap state says no model is ready, but settings can change while a
-      // recording is in flight (or the in-memory bootstrap default can race a
-      // cold launch). Never hand an empty model name to the transcriber: it
-      // silently produces nothing (or junk like "[BLANK_AUDIO]").
-      transcriptionFeatureLogger.error("Recording stopped with no transcription model selected; discarding audio")
-      return .merge(
-        handleDiscard(&state),
-        .send(.modelMissing)
-      )
-    }
-
-    // Otherwise, proceed to transcription
+    // Otherwise, proceed to transcription. An empty model name is handled inside
+    // `transcribeEffect`, which keeps the audio instead of discarding it.
     state.isTranscribing = true
     state.error = nil
-    let language = state.hexSettings.outputLanguage
-
     state.isPrewarming = true
 
     return .merge(
@@ -374,54 +373,77 @@ private extension TranscriptionFeature {
         // Allow system to sleep again
         await sleepManagement.allowSleep()
 
-        var audioURL: URL?
-        defer {
-          if let audioURL {
-            FileManager.default.removeItemIfExists(at: audioURL)
-          }
-        }
-        do {
-          let stopResult = await recording.stopRecording()
-          let capturedURL: URL
-          switch stopResult {
-          case let .captured(url):
-            capturedURL = url
-          case .ignored(.staleSession):
-            transcriptionFeatureLogger.notice("Ignoring transcription stop superseded by a newer recording session")
-            return
-          case .ignored(.noActiveRecording):
-            transcriptionFeatureLogger.error("Recording stopped without captured audio")
-            await send(.transcriptionError(RecordingFailure.noCapturedAudio, nil))
-            return
-          case let .failed(error):
-            transcriptionFeatureLogger.error("Recording stop failed: \(error.localizedDescription)")
-            await send(.transcriptionError(error, nil))
-            return
-          }
-          audioURL = capturedURL
-          guard !Task.isCancelled else { return }
+        // Note: the captured file is deliberately not deleted on any exit path. A failed
+        // or superseded transcription used to destroy the recording; now the audio is
+        // either handed to persistence or swept up by the orphan cleanup on next launch.
+        let stopResult = await recording.stopRecording()
+        switch stopResult {
+        case let .captured(url):
           soundEffect.play(.stopRecording)
-
-          // Create transcription options with the selected language
-          // Note: cap concurrency to avoid audio I/O overloads on some Macs
-          let decodeOptions = DecodingOptions(
-            language: language,
-            detectLanguage: language == nil, // Only auto-detect if no language specified
-            chunkingStrategy: .vad,
-          )
-
-          let result = try await transcription.transcribe(capturedURL, model, decodeOptions) { _ in }
-
-          transcriptionFeatureLogger.notice("Transcribed audio from \(capturedURL.lastPathComponent) to text length \(result.count)")
-          audioURL = nil
-          await send(.transcriptionResult(result, capturedURL, duration))
-        } catch {
-          transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
-          await send(.transcriptionError(error, nil))
+          await send(.transcribe(url, duration, .pasted))
+        case .ignored(.staleSession):
+          transcriptionFeatureLogger.notice("Ignoring transcription stop superseded by a newer recording session")
+        case .ignored(.noActiveRecording):
+          transcriptionFeatureLogger.error("Recording stopped without captured audio")
+          await send(.transcriptionError(RecordingFailure.noCapturedAudio, nil, duration))
+        case let .failed(error):
+          transcriptionFeatureLogger.error("Recording stop failed: \(error.localizedDescription)")
+          await send(.transcriptionError(error, nil, duration))
         }
       }
       .cancellable(id: CancelID.transcription)
     )
+  }
+
+  /// Transcribes a captured recording and reports the text back to the reducer.
+  ///
+  /// Shared by the normal stop path and the cancel path, so cancelling produces a
+  /// recoverable transcript rather than a deleted file.
+  func transcribeEffect(url: URL, duration: TimeInterval, status: TranscriptStatus) -> Effect<Action> {
+    .run { send in
+      @Shared(.hexSettings) var hexSettings: HexSettings
+
+      let model = hexSettings.selectedModel
+      guard !model.isEmpty else {
+        // Defense-in-depth: handleStartRecording blocks recording when the bootstrap state
+        // says no model is ready, but settings can change while a recording is in flight.
+        // Never hand an empty model name to the transcriber: it silently produces nothing.
+        transcriptionFeatureLogger.error("No transcription model selected; keeping audio \(url.lastPathComponent)")
+        await send(.modelMissing)
+        await send(.transcriptionError(TranscriptionFailure.noModelSelected, url, duration))
+        return
+      }
+
+      let language = hexSettings.outputLanguage
+      let decodeOptions = DecodingOptions(
+        language: language,
+        detectLanguage: language == nil, // Only auto-detect if no language specified
+        chunkingStrategy: .vad,
+      )
+
+      do {
+        let result = try await transcription.transcribe(url, model, decodeOptions) { _ in }
+        transcriptionFeatureLogger.notice(
+          "Transcribed audio from \(url.lastPathComponent) to text length \(result.count)"
+        )
+        await send(.transcriptionResult(result, url, duration, status))
+      } catch {
+        transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
+        await send(.transcriptionError(error, url, duration))
+      }
+    }
+    .cancellable(id: CancelID.transcription)
+  }
+}
+
+enum TranscriptionFailure: Error, Equatable, LocalizedError {
+  case noModelSelected
+
+  var errorDescription: String? {
+    switch self {
+    case .noModelSelected:
+      "No transcription model is selected."
+    }
   }
 }
 
@@ -432,7 +454,8 @@ private extension TranscriptionFeature {
     _ state: inout State,
     result: String,
     audioURL: URL,
-    duration: TimeInterval
+    duration: TimeInterval,
+    status: TranscriptStatus
   ) -> Effect<Action> {
     state.isTranscribing = false
     state.isPrewarming = false
@@ -506,10 +529,11 @@ private extension TranscriptionFeature {
           sourceAppBundleID: sourceAppBundleID,
           sourceAppName: sourceAppName,
           audioURL: audioURL,
+          status: status,
           transcriptionHistory: transcriptionHistory
         )
       } catch {
-        await send(.transcriptionError(error, audioURL))
+        await send(.transcriptionError(error, audioURL, duration))
       }
     }
     .cancellable(id: CancelID.transcription)
@@ -518,26 +542,53 @@ private extension TranscriptionFeature {
   func handleTranscriptionError(
     _ state: inout State,
     error: Error,
-    audioURL: URL?
+    audioURL: URL?,
+    duration: TimeInterval
   ) -> Effect<Action> {
     state.isTranscribing = false
     state.isPrewarming = false
     state.error = error.localizedDescription
-    
-    if let audioURL {
-      FileManager.default.removeItemIfExists(at: audioURL)
-    }
 
-    return .none
+    // A failed transcription must not throw away what was said. Keep the audio in history
+    // so it can be played back instead of disappearing, exactly like a cancelled take.
+    guard let audioURL else { return .none }
+
+    let sourceAppBundleID = state.sourceAppBundleID
+    let sourceAppName = state.sourceAppName
+    let transcriptionHistory = state.$transcriptionHistory
+
+    return .run { _ in
+      do {
+        try await finalizeRecordingAndStoreTranscript(
+          result: "",
+          duration: duration,
+          sourceAppBundleID: sourceAppBundleID,
+          sourceAppName: sourceAppName,
+          audioURL: audioURL,
+          status: .failed,
+          transcriptionHistory: transcriptionHistory
+        )
+      } catch {
+        transcriptionFeatureLogger.error("Could not preserve failed recording: \(error.localizedDescription)")
+        FileManager.default.removeItemIfExists(at: audioURL)
+      }
+    }
+    .cancellable(id: CancelID.transcription)
   }
 
-  /// Move file to permanent location, create a transcript record, paste text, and play sound.
+  /// Move file to permanent location, create a transcript record, and paste the text when the
+  /// recording actually ended in a paste.
+  ///
+  /// Nothing that reaches here is deleted while history is enabled: cancelled and failed
+  /// recordings are kept so the words stay recoverable. Turning history off remains the way
+  /// to opt out of retaining audio.
   func finalizeRecordingAndStoreTranscript(
     result: String,
     duration: TimeInterval,
     sourceAppBundleID: String?,
     sourceAppName: String?,
     audioURL: URL,
+    status: TranscriptStatus,
     transcriptionHistory: Shared<TranscriptionHistory>
   ) async throws {
     @Shared(.hexSettings) var hexSettings: HexSettings
@@ -548,7 +599,8 @@ private extension TranscriptionFeature {
         audioURL,
         duration,
         sourceAppBundleID,
-        sourceAppName
+        sourceAppName,
+        status
       )
 
       transcriptionHistory.withLock { history in
@@ -568,6 +620,7 @@ private extension TranscriptionFeature {
       FileManager.default.removeItemIfExists(at: audioURL)
     }
 
+    guard status.wasPasted else { return }
     await pasteboard.paste(result)
     soundEffect.play(.pasteTranscript)
   }
@@ -576,29 +629,35 @@ private extension TranscriptionFeature {
 // MARK: - Cancel/Discard Handlers
 
 private extension TranscriptionFeature {
+  /// ESC. Cancelling is a decision about *pasting*, not about whether what you said is worth
+  /// keeping — so the recording is stopped and transcribed as usual, then stored as
+  /// `.notPasted` instead of being pasted. This used to delete the audio outright, which is
+  /// why cancelling felt like losing the last thing you said. The text stays one keystroke
+  /// away via "Paste Last Transcript".
   func handleCancel(_ state: inout State) -> Effect<Action> {
     let wasRecording = state.isRecording
+    let duration = state.recordingStartTime.map { now.timeIntervalSince($0) } ?? 0
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
 
-    return .merge(
+    return .concatenate(
       .cancel(id: CancelID.transcription),
       .cancel(id: CancelID.recordingStart),
-      .run { [sleepManagement] _ in
+      .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
         guard wasRecording else {
           soundEffect.play(.cancel)
           return
         }
-        // Stop the recording to release microphone access
-		let result = await recording.stopRecording()
-		if case let .captured(url) = result {
-		  FileManager.default.removeItemIfExists(at: url)
-		}
-		guard !Task.isCancelled else { return }
-		soundEffect.play(.cancel)
+        // Stop the recording to release microphone access, keeping the audio.
+        let result = await recording.stopRecording()
+        soundEffect.play(.cancel)
+
+        guard case let .captured(url) = result else { return }
+        guard !Task.isCancelled else { return }
+        await send(.transcribe(url, duration, .notPasted))
       }
       .cancellable(id: CancelID.recordingCleanup, cancelInFlight: true)
     )
