@@ -1049,6 +1049,13 @@ actor RecordingClientLive {
     FileManager.default.temporaryDirectory.appendingPathComponent("hex-capture-\(UUID().uuidString).wav")
   }
 
+  /// Extra audio captured *after* the stop signal, before anything is torn down.
+  ///
+  /// Releasing the hotkey as the last word lands clips it, and a file that ends exactly on
+  /// the final word gives the transcriber nothing after it to work with. Holding capture open
+  /// briefly trades a short delay before transcription for not losing the tail.
+  static let stopTailBufferDuration: TimeInterval = 0.4
+
   nonisolated static func shouldIgnoreStopRequest(
     snapshotSessionID: UUID?,
     currentSessionID: UUID?
@@ -1356,6 +1363,16 @@ actor RecordingClientLive {
     let activeSession = activeRecordingSession
 
     if activeSession?.backend == .captureEngine || captureController.isRecording {
+      // Hold the capture open for the tail buffer first. The engine is still writing to the
+      // active recording during this sleep, so the extra audio really is captured rather
+      // than merely waited for.
+      if Self.stopTailBufferDuration > 0 {
+        recordingLogger.debug(
+          "Holding capture open \(self.formatDuration(Self.stopTailBufferDuration)) after stop to catch the tail"
+        )
+        try? await Task.sleep(for: .milliseconds(Int((Self.stopTailBufferDuration * 1000).rounded())))
+      }
+
       let stopTimingEstimate = captureController.stopTimingEstimate
       recordingLogger.debug(
         "Waiting \(self.formatDuration(stopTimingEstimate.gracePeriod)) before finalizing capture-engine recording callbackInterval=\(self.formatDuration(stopTimingEstimate.callbackInterval)) bufferDuration=\(self.formatDuration(stopTimingEstimate.bufferDuration))"

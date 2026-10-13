@@ -377,13 +377,16 @@ private extension TranscriptionFeature {
         // Allow system to sleep again
         await sleepManagement.allowSleep()
 
+        // Play the cue immediately: stopping now holds capture open briefly to catch the tail,
+        // and the sound is the user's signal that recording has ended.
+        soundEffect.play(.stopRecording)
+
         // Note: the captured file is deliberately not deleted on any exit path. A failed
         // or superseded transcription used to destroy the recording; now the audio is
         // either handed to persistence or swept up by the orphan cleanup on next launch.
         let stopResult = await recording.stopRecording()
         switch stopResult {
         case let .captured(url):
-          soundEffect.play(.stopRecording)
           await send(.transcribe(url, duration, .pasted))
         case .ignored(.staleSession):
           transcriptionFeatureLogger.notice("Ignoring transcription stop superseded by a newer recording session")
