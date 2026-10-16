@@ -31,8 +31,6 @@ struct TranscriptionFeature {
     /// capture engine can take up to a second to deliver its first buffer, and anything said in
     /// that gap is lost. The indicator must not claim to be listening before it is.
     var isCapturing: Bool = false
-    /// What the transcriber is hearing so far, shown while you are still speaking.
-    var livePreviewText: String = ""
     var sourceAppBundleID: String?
     var sourceAppName: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
@@ -44,7 +42,6 @@ struct TranscriptionFeature {
   enum Action {
     case task
     case audioLevelUpdated(Meter)
-    case livePreviewUpdated(String)
 
     // Hotkey actions
     case hotKeyPressed
@@ -119,10 +116,6 @@ struct TranscriptionFeature {
             "Capture is live \(String(format: "%.2f", startup))s after the hotkey"
           )
         }
-        return .none
-
-      case let .livePreviewUpdated(text):
-        state.livePreviewText = text
         return .none
 
       // MARK: - HotKey Flow
@@ -313,12 +306,11 @@ private extension TranscriptionFeature {
   }
 
   /// Begins a preview session so words appear as they are said rather than only once the
-  /// recording is finished.
+  /// recording is finished. The decoded text is published through shared state rather than a
+  /// callback, so nothing here depends on this effect staying alive.
   func beginLivePreviewEffect() -> Effect<Action> {
-    .run { send in
-      await livePreview.begin { text in
-        await send(.livePreviewUpdated(text))
-      }
+    .run { _ in
+      await livePreview.begin()
     }
   }
 
@@ -401,7 +393,6 @@ private extension TranscriptionFeature {
 
   func handleStopRecording(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
-    state.livePreviewText = ""
     
     let stopTime = now
     let startTime = state.recordingStartTime
@@ -717,7 +708,6 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
-    state.livePreviewText = ""
 
     return .concatenate(
       .cancel(id: CancelID.transcription),
@@ -745,7 +735,6 @@ private extension TranscriptionFeature {
   func handleDiscard(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
     state.isPrewarming = false
-    state.livePreviewText = ""
 
     // Silently discard - no sound effect
     return .merge(
@@ -770,6 +759,7 @@ private extension TranscriptionFeature {
 struct TranscriptionView: View {
   @Bindable var store: StoreOf<TranscriptionFeature>
   @ObserveInjection var inject
+  @Shared(.livePreviewText) var livePreviewText: String
 
   var status: TranscriptionIndicatorView.Status {
     if store.isTranscribing {
@@ -789,7 +779,7 @@ struct TranscriptionView: View {
       meter: store.meter,
       speech: store.speech,
       recordingStartedAt: store.recordingStartTime,
-      liveText: store.livePreviewText,
+      liveText: livePreviewText,
       isCapturing: store.isCapturing
     )
     .task {

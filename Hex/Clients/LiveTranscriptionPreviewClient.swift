@@ -21,9 +21,21 @@ private let previewLogger = HexLog.transcription
 ///   explicitly not streaming-capable, so a second model would have to be downloaded and held
 ///   in memory for what is only a preview.
 /// - The scratch file is reused in place, so nothing accumulates on disk.
+extension SharedReaderKey where Self == InMemoryKey<String>.Default {
+    /// Text the preview has decoded so far: written by the decoder, read by the indicator.
+    ///
+    /// Deliberately shared state rather than a TCA action. The decode finishes long after the
+    /// effect that started it has returned, and TCA's `Send` silently drops actions based on
+    /// task cancellation, so routing this through an action made it depend on effect lifetime
+    /// in a way that kept breaking.
+    static var livePreviewText: Self {
+        Self[.inMemory("livePreviewText"), default: ""]
+    }
+}
+
 @DependencyClient
 struct LiveTranscriptionPreviewClient {
-    var begin: @Sendable (_ onText: @escaping @Sendable (String) async -> Void) async -> Void
+    var begin: @Sendable () async -> Void
     var append: @Sendable (_ samples: [Float]) async -> Void
     var end: @Sendable () async -> Void
 }
@@ -32,14 +44,14 @@ extension LiveTranscriptionPreviewClient: DependencyKey {
     public static var liveValue: LiveTranscriptionPreviewClient {
         let live = LiveTranscriptionPreviewLive()
         return LiveTranscriptionPreviewClient(
-            begin: { await live.begin(onText: $0) },
+            begin: { await live.begin() },
             append: { await live.append($0) },
             end: { await live.end() }
         )
     }
 
     public static let testValue = LiveTranscriptionPreviewClient(
-        begin: { _ in },
+        begin: {},
         append: { _ in },
         end: {}
     )
@@ -71,8 +83,9 @@ actor LiveTranscriptionPreviewLive {
 
     @Dependency(\.transcription) var transcription
 
+    @Shared(.livePreviewText) var livePreviewText: String
+
     private var samples: [Float] = []
-    private var onText: (@Sendable (String) async -> Void)?
     private var refreshTask: Task<Void, Never>?
     private var isRunning = false
     private var lastText = ""
@@ -83,8 +96,8 @@ actor LiveTranscriptionPreviewLive {
     private let scratchURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("hex-live-preview.wav")
 
-    func begin(onText: @escaping @Sendable (String) async -> Void) {
-        self.onText = onText
+    func begin() {
+        $livePreviewText.withLock { $0 = "" }
         samples.removeAll(keepingCapacity: true)
         lastText = ""
         isRunning = true
@@ -125,7 +138,7 @@ actor LiveTranscriptionPreviewLive {
         isRunning = false
         refreshTask?.cancel()
         refreshTask = nil
-        onText = nil
+        $livePreviewText.withLock { $0 = "" }
         samples.removeAll(keepingCapacity: false)
         lastText = ""
         try? FileManager.default.removeItem(at: scratchURL)
@@ -186,7 +199,7 @@ actor LiveTranscriptionPreviewLive {
             guard isRunning, text != lastText else { return }
             lastText = text
             previewLogger.notice("Live preview: publishing \(text.count) characters")
-            await onText?(text)
+            $livePreviewText.withLock { $0 = text }
         } catch {
             previewLogger.debug("Live preview decode failed: \(error.localizedDescription)")
         }
