@@ -2,6 +2,8 @@
 
 I rewrote Hex in Rust. **[Try the new beta](https://hex.kitlangton.com)** and tell me what you think.
 
+https://github.com/user-attachments/assets/049b4cec-a34e-4a81-81eb-8ea82af5ff3f
+
 The new source lives at **[anomalyco/hex](https://github.com/anomalyco/hex)**.
 This repository preserves the original Swift app, its history, and its releases.
 
