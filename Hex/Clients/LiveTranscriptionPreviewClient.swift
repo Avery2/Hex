@@ -21,15 +21,23 @@ private let previewLogger = HexLog.transcription
 ///   explicitly not streaming-capable, so a second model would have to be downloaded and held
 ///   in memory for what is only a preview.
 /// - The scratch file is reused in place, so nothing accumulates on disk.
-extension SharedReaderKey where Self == InMemoryKey<String>.Default {
-    /// Text the preview has decoded so far: written by the decoder, read by the indicator.
+/// What the live preview has decoded, plus where the newly-arrived words start.
+struct LivePreviewSnapshot: Codable, Equatable {
+    var text: String = ""
+    /// Characters of `text` that were already there on the previous decode. Everything after
+    /// this point is what just arrived, and is drawn brighter than the rest.
+    var carriedOverCharacters: Int = 0
+}
+
+extension SharedReaderKey where Self == InMemoryKey<LivePreviewSnapshot>.Default {
+    /// Written by the preview decoder, read by the indicator.
     ///
     /// Deliberately shared state rather than a TCA action. The decode finishes long after the
     /// effect that started it has returned, and TCA's `Send` silently drops actions based on
     /// task cancellation, so routing this through an action made it depend on effect lifetime
     /// in a way that kept breaking.
-    static var livePreviewText: Self {
-        Self[.inMemory("livePreviewText"), default: ""]
+    static var livePreview: Self {
+        Self[.inMemory("livePreview"), default: .init()]
     }
 }
 
@@ -83,7 +91,7 @@ actor LiveTranscriptionPreviewLive {
 
     @Dependency(\.transcription) var transcription
 
-    @Shared(.livePreviewText) var livePreviewText: String
+    @Shared(.livePreview) var snapshot: LivePreviewSnapshot
 
     private var samples: [Float] = []
     private var refreshTask: Task<Void, Never>?
@@ -97,7 +105,7 @@ actor LiveTranscriptionPreviewLive {
         .appendingPathComponent("hex-live-preview.wav")
 
     func begin() {
-        $livePreviewText.withLock { $0 = "" }
+        $snapshot.withLock { $0 = .init() }
         samples.removeAll(keepingCapacity: true)
         lastText = ""
         isRunning = true
@@ -138,7 +146,7 @@ actor LiveTranscriptionPreviewLive {
         isRunning = false
         refreshTask?.cancel()
         refreshTask = nil
-        $livePreviewText.withLock { $0 = "" }
+        $snapshot.withLock { $0 = .init() }
         samples.removeAll(keepingCapacity: false)
         lastText = ""
         try? FileManager.default.removeItem(at: scratchURL)
@@ -197,12 +205,40 @@ actor LiveTranscriptionPreviewLive {
 
             // Dropped if the recording ended while this decode was in flight.
             guard isRunning, text != lastText else { return }
+            let carriedOver = Self.carriedOverCharacterCount(previous: lastText, current: text)
             lastText = text
-            previewLogger.notice("Live preview: publishing \(text.count) characters")
-            $livePreviewText.withLock { $0 = text }
+            previewLogger.notice(
+                "Live preview: publishing \(text.count) characters (\(text.count - carriedOver) new)"
+            )
+            $snapshot.withLock {
+                $0 = LivePreviewSnapshot(text: text, carriedOverCharacters: carriedOver)
+            }
         } catch {
             previewLogger.debug("Live preview decode failed: \(error.localizedDescription)")
         }
+    }
+
+    /// How many leading characters of `current` were already present at the end of `previous`.
+    ///
+    /// The window slides, so a decode is `previous` with leading words dropped and trailing
+    /// words added. Matching on whole words rather than characters keeps the highlight boundary
+    /// from landing mid-word when the decoder's wording shifts slightly between passes.
+    static func carriedOverCharacterCount(previous: String, current: String) -> Int {
+        guard !previous.isEmpty, !current.isEmpty else { return 0 }
+        let previousWords = previous.split(separator: " ")
+        let currentWords = current.split(separator: " ")
+        let maximumOverlap = min(previousWords.count, currentWords.count)
+        guard maximumOverlap > 0 else { return 0 }
+
+        for overlap in stride(from: maximumOverlap, through: 1, by: -1) {
+            guard previousWords.suffix(overlap).elementsEqual(currentWords.prefix(overlap)) else {
+                continue
+            }
+            let matched = currentWords.prefix(overlap).joined(separator: " ")
+            // +1 skips the space that separates the carried-over words from the new ones.
+            return min(current.count, matched.count + 1)
+        }
+        return 0
     }
 
     /// True when the window carries speech-level energy rather than room tone.

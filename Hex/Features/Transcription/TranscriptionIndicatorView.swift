@@ -29,6 +29,9 @@ struct TranscriptionIndicatorView: View {
   var recordingStartedAt: Date?
   /// What the transcriber is hearing so far, shown while you are still speaking.
   var liveText: String = ""
+  /// Leading characters of `liveText` that were already there on the previous decode. The rest
+  /// is what just arrived, and is drawn brighter so the eye lands on the newest words.
+  var liveTextCarriedOver: Int = 0
   /// Whether audio is actually flowing yet — see `TranscriptionFeature.State.isCapturing`.
   var isCapturing: Bool = true
 
@@ -109,6 +112,17 @@ struct TranscriptionIndicatorView: View {
 
   /// Placeholder states are shown dimmed so real transcribed words stand out from status.
   private var statusLineIsPlaceholder: Bool { liveText.isEmpty }
+
+  /// Two-tone when there are real words: what just arrived at full brightness, everything
+  /// carried over from the previous decode dimmed behind it.
+  private func statusText(_ line: String) -> Text {
+    guard !statusLineIsPlaceholder else {
+      return Text(line).foregroundStyle(Color.white.opacity(0.6))
+    }
+    let split = min(max(0, liveTextCarriedOver), line.count)
+    return Text(String(line.prefix(split))).foregroundStyle(Color.white.opacity(0.4))
+      + Text(String(line.dropFirst(split))).foregroundStyle(Color.white)
+  }
 
   @State var transcribeEffect = 0
 
@@ -200,9 +214,8 @@ struct TranscriptionIndicatorView: View {
         // not "I am getting your words". Head truncation because the rolling window keeps the
         // most recent words at the end.
         if let statusLine {
-          Text(statusLine)
+          statusText(statusLine)
             .font(.system(size: 13))
-            .foregroundColor(statusLineIsPlaceholder ? Color.white.opacity(0.6) : .white)
             .lineLimit(2)
             .multilineTextAlignment(.center)
             .truncationMode(.head)

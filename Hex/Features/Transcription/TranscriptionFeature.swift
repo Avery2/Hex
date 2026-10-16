@@ -759,7 +759,7 @@ private extension TranscriptionFeature {
 struct TranscriptionView: View {
   @Bindable var store: StoreOf<TranscriptionFeature>
   @ObserveInjection var inject
-  @Shared(.livePreviewText) var livePreviewText: String
+  @Shared(.livePreview) var livePreview: LivePreviewSnapshot
 
   var status: TranscriptionIndicatorView.Status {
     if store.isTranscribing {
@@ -779,7 +779,8 @@ struct TranscriptionView: View {
       meter: store.meter,
       speech: store.speech,
       recordingStartedAt: store.recordingStartTime,
-      liveText: livePreviewText,
+      liveText: livePreview.text,
+      liveTextCarriedOver: livePreview.carriedOverCharacters,
       isCapturing: store.isCapturing
     )
     .task {
