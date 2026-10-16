@@ -32,10 +32,6 @@ struct TranscriptionIndicatorView: View {
   /// Whether audio is actually flowing yet — see `TranscriptionFeature.State.isCapturing`.
   var isCapturing: Bool = true
 
-  /// The engine has been asked to record but has not delivered a frame yet, so nothing said
-  /// right now would be kept.
-  private var isWaitingForAudio: Bool { status == .recording && !isCapturing }
-
   let transcribeBaseColor: Color = .blue
   private var backgroundColor: Color {
     switch status {
@@ -89,6 +85,10 @@ struct TranscriptionIndicatorView: View {
     status == .hidden
   }
 
+  /// The engine has been asked to record but has not delivered a frame yet, so nothing said
+  /// right now would be kept.
+  private var isWaitingForAudio: Bool { status == .recording && !isCapturing }
+
   /// The status line is present for the whole recording and never goes blank, so an empty line
   /// means the indicator itself is broken rather than "nothing to say yet". A three-step
   /// progression, so it never claims more than it knows:
@@ -115,104 +115,108 @@ struct TranscriptionIndicatorView: View {
   var body: some View {
     let averagePower = min(1, meter.averagePower * 3)
     let peakPower = min(1, meter.peakPower * 3)
-    ZStack {
-      Capsule()
-        .fill(backgroundColor.shadow(.inner(color: innerShadowColor, radius: 4)))
-        .overlay {
-          Capsule()
-            .stroke(strokeColor, lineWidth: 1)
-            .blendMode(.screen)
-        }
-        .overlay(alignment: .center) {
-          RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color.red.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 1) : 0))
-            .blur(radius: 2)
-            .blendMode(.screen)
-            .padding(6)
-        }
-        .overlay(alignment: .center) {
-          RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color.white.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 0.5) : 0))
-            .blur(radius: 1)
-            .blendMode(.screen)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(7)
-        }
-        .overlay(alignment: .center) {
-          GeometryReader { proxy in
-            RoundedRectangle(cornerRadius: cornerRadius)
-              .fill(Color.red.opacity(status == .recording ? (peakPower < 0.1 ? (peakPower / 0.1) * 0.5 : 0.5) : 0))
-              .frame(width: max(proxy.size.width * (peakPower + 0.6), 0), height: proxy.size.height, alignment: .center)
-              .frame(maxWidth: .infinity, alignment: .center)
-              .blur(radius: 4)
+
+    // The status line is a sibling in a top-anchored VStack rather than an overlay on the
+    // capsule. As an overlay it was proposed the capsule's 56pt width, so a sentence collapsed
+    // to "…g…"; as a sibling it gets the full width to wrap in. Top anchoring keeps the capsule
+    // from moving when the line appears.
+    ZStack(alignment: .top) {
+      VStack(spacing: 18) {
+        Capsule()
+          .fill(backgroundColor.shadow(.inner(color: innerShadowColor, radius: 4)))
+          .overlay {
+            Capsule()
+              .stroke(strokeColor, lineWidth: 1)
               .blendMode(.screen)
-          }.padding(6)
-        }
-        .cornerRadius(cornerRadius)
-        .shadow(
-          color: status == .recording ? .red.opacity(averagePower) : .red.opacity(0),
-          radius: 4
-        )
-        .shadow(
-          color: status == .recording ? .red.opacity(averagePower * 0.5) : .red.opacity(0),
-          radius: 8
-        )
-        .animation(.interactiveSpring(), value: meter)
-        .frame(
-          width: status == .recording ? expandedWidth : baseWidth,
-          height: baseWidth
-        )
-        .opacity(status == .hidden ? 0 : 1)
-        .scaleEffect(status == .hidden ? 0.0 : 1)
-        .blur(radius: status == .hidden ? 4 : 0)
-        .animation(.bouncy(duration: 0.3), value: status)
-        .changeEffect(.glow(color: .red.opacity(0.5), radius: 8), value: status)
-        .changeEffect(.shine(angle: .degrees(0), duration: 0.6), value: transcribeEffect)
-        .compositingGroup()
-        // Overlays rather than siblings inside the ZStack: a sibling grows the ZStack, which
-        // pushed the capsule off centre whenever text appeared.
-        .overlay(alignment: .top) {
-          if status == .prewarming {
-            Text("Model prewarming...")
-              .font(.system(size: 12, weight: .medium))
-              .foregroundColor(.white)
-              .fixedSize()
-              .padding(.horizontal, 8)
-              .padding(.vertical, 4)
-              .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.8)))
-              .offset(y: -30)
-              .transition(.opacity)
           }
-        }
+          .overlay(alignment: .center) {
+            RoundedRectangle(cornerRadius: cornerRadius)
+              .fill(Color.red.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 1) : 0))
+              .blur(radius: 2)
+              .blendMode(.screen)
+              .padding(6)
+          }
+          .overlay(alignment: .center) {
+            RoundedRectangle(cornerRadius: cornerRadius)
+              .fill(Color.white.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 0.5) : 0))
+              .blur(radius: 1)
+              .blendMode(.screen)
+              .frame(maxWidth: .infinity, alignment: .center)
+              .padding(7)
+          }
+          .overlay(alignment: .center) {
+            GeometryReader { proxy in
+              RoundedRectangle(cornerRadius: cornerRadius)
+                .fill(Color.red.opacity(status == .recording ? (peakPower < 0.1 ? (peakPower / 0.1) * 0.5 : 0.5) : 0))
+                .frame(width: max(proxy.size.width * (peakPower + 0.6), 0), height: proxy.size.height, alignment: .center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .blur(radius: 4)
+                .blendMode(.screen)
+            }.padding(6)
+          }
+          .cornerRadius(cornerRadius)
+          .shadow(
+            color: status == .recording ? .red.opacity(averagePower) : .red.opacity(0),
+            radius: 4
+          )
+          .shadow(
+            color: status == .recording ? .red.opacity(averagePower * 0.5) : .red.opacity(0),
+            radius: 8
+          )
+          .animation(.interactiveSpring(), value: meter)
+          .frame(
+            width: status == .recording ? expandedWidth : baseWidth,
+            height: baseWidth
+          )
+          .opacity(status == .hidden ? 0 : 1)
+          .scaleEffect(status == .hidden ? 0.0 : 1)
+          .blur(radius: status == .hidden ? 4 : 0)
+          .animation(.bouncy(duration: 0.3), value: status)
+          .changeEffect(.glow(color: .red.opacity(0.5), radius: 8), value: status)
+          .changeEffect(.shine(angle: .degrees(0), duration: 0.6), value: transcribeEffect)
+          .compositingGroup()
+          .overlay(alignment: .top) {
+            if status == .prewarming {
+              Text("Model prewarming...")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white)
+                .fixedSize()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.8)))
+                .offset(y: -30)
+                .transition(.opacity)
+            }
+          }
+          .task(id: status == .transcribing) {
+            while status == .transcribing, !Task.isCancelled {
+              transcribeEffect += 1
+              try? await Task.sleep(for: .seconds(0.25))
+            }
+          }
+
         // The words themselves, or the current state when there are none yet. This is the whole
         // point of the indicator: a level meter and a colour can only say "something is loud",
         // not "I am getting your words". Head truncation because the rolling window keeps the
         // most recent words at the end.
-        .overlay(alignment: .bottom) {
-          if let statusLine {
-            Text(statusLine)
-              .font(.system(size: 13))
-              .foregroundColor(statusLineIsPlaceholder ? Color.white.opacity(0.65) : .white)
-              .lineLimit(2)
-              .multilineTextAlignment(.center)
-              .truncationMode(.head)
-              .frame(maxWidth: 460)
-              .padding(.horizontal, 10)
-              .padding(.vertical, 6)
-              .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.75)))
-              .offset(y: 34)
-              .transition(.opacity)
-          }
+        if let statusLine {
+          Text(statusLine)
+            .font(.system(size: 13))
+            .foregroundColor(statusLineIsPlaceholder ? Color.white.opacity(0.6) : .white)
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+            .truncationMode(.head)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 520)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.75)))
+            .transition(.opacity)
         }
-        .task(id: status == .transcribing) {
-          while status == .transcribing, !Task.isCancelled {
-            transcribeEffect += 1
-            try? await Task.sleep(for: .seconds(0.25))
-          }
-        }
+      }
+      .frame(maxWidth: .infinity)
     }
-    .animation(.easeInOut(duration: 0.15), value: statusLine)
-    .animation(.easeInOut(duration: 0.15), value: liveText.isEmpty)
+    .animation(.easeInOut(duration: 0.15), value: statusLineIsPlaceholder)
     .enableInjection()
   }
 }
@@ -221,9 +225,8 @@ struct TranscriptionIndicatorView: View {
   var speaking = SpeechActivityDetector()
   speaking.ingest(averagePower: 0.05)
 
-  return VStack(spacing: 8) {
+  return VStack(spacing: 60) {
     TranscriptionIndicatorView(status: .hidden, meter: .init(averagePower: 0, peakPower: 0))
-    TranscriptionIndicatorView(status: .optionKeyPressed, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(
       status: .recording,
       meter: .init(averagePower: 0.5, peakPower: 0.5),
@@ -232,8 +235,18 @@ struct TranscriptionIndicatorView: View {
     )
     TranscriptionIndicatorView(
       status: .recording,
+      meter: .init(averagePower: 0.2, peakPower: 0.3),
+      recordingStartedAt: Date().addingTimeInterval(-1)
+    )
+    TranscriptionIndicatorView(
+      status: .recording,
       meter: .init(averagePower: 0.05, peakPower: 0.05),
       recordingStartedAt: Date().addingTimeInterval(-5)
+    )
+    TranscriptionIndicatorView(
+      status: .recording,
+      meter: .init(averagePower: 0, peakPower: 0),
+      isCapturing: false
     )
     TranscriptionIndicatorView(status: .transcribing, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .prewarming, meter: .init(averagePower: 0, peakPower: 0))
