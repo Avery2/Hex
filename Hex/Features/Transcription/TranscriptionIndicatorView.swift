@@ -25,7 +25,7 @@ struct TranscriptionIndicatorView: View {
   var meter: Meter
   /// Used only to tell a dead microphone from a quiet room, which the level meter cannot.
   var speech: SpeechActivityDetector = .init()
-  /// When the current recording started; used to decide when silence is worth mentioning.
+  /// When audio actually started flowing, used to decide when silence is worth mentioning.
   var recordingStartedAt: Date?
   /// What the transcriber is hearing so far, shown while you are still speaking.
   var liveText: String = ""
@@ -135,7 +135,11 @@ struct TranscriptionIndicatorView: View {
     // to "…g…"; as a sibling it gets the full width to wrap in. Top anchoring keeps the capsule
     // from moving when the line appears.
     ZStack(alignment: .top) {
-      VStack(spacing: 18) {
+      // No `maxWidth: .infinity` here on purpose: stretching the stack proposes the full width
+      // to the status line, so `.frame(maxWidth: 520)` always took 520pt and "Listening…"
+      // rendered as a 520pt black bar. Left to size itself, the line hugs short text and only
+      // wraps once it reaches the cap.
+      VStack(spacing: 14) {
         Capsule()
           .fill(backgroundColor.shadow(.inner(color: innerShadowColor, radius: 4)))
           .overlay {
@@ -227,7 +231,6 @@ struct TranscriptionIndicatorView: View {
             .transition(.opacity)
         }
       }
-      .frame(maxWidth: .infinity)
     }
     .animation(.easeInOut(duration: 0.15), value: statusLineIsPlaceholder)
     .enableInjection()

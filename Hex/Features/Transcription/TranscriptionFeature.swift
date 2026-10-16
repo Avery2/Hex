@@ -31,6 +31,10 @@ struct TranscriptionFeature {
     /// capture engine can take up to a second to deliver its first buffer, and anything said in
     /// that gap is lost. The indicator must not claim to be listening before it is.
     var isCapturing: Bool = false
+    /// When audio actually started flowing, so the "nothing heard" warning is measured from
+    /// there rather than from the hotkey press — otherwise engine startup time counts against
+    /// the user and the warning fires before they have had a chance to speak.
+    var listeningSince: Date?
     var sourceAppBundleID: String?
     var sourceAppName: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
@@ -111,7 +115,8 @@ struct TranscriptionFeature {
         // frame after a start is real proof that audio is arriving.
         if state.isRecording, !state.isCapturing {
           state.isCapturing = true
-          let startup = state.recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+          state.listeningSince = now
+          let startup = state.recordingStartTime.map { now.timeIntervalSince($0) } ?? 0
           transcriptionFeatureLogger.notice(
             "Capture is live \(String(format: "%.2f", startup))s after the hotkey"
           )
@@ -360,6 +365,7 @@ private extension TranscriptionFeature {
     state.recordingStartTime = startTime
     state.speech.reset()
     state.isCapturing = false
+    state.listeningSince = nil
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -778,7 +784,7 @@ struct TranscriptionView: View {
       status: status,
       meter: store.meter,
       speech: store.speech,
-      recordingStartedAt: store.recordingStartTime,
+      recordingStartedAt: store.listeningSince,
       liveText: livePreview.text,
       liveTextCarriedOver: livePreview.carriedOverCharacters,
       isCapturing: store.isCapturing
