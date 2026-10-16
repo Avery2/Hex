@@ -27,6 +27,10 @@ struct TranscriptionFeature {
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
     /// What the mic levels say about whether words are actually being captured.
     var speech = SpeechActivityDetector()
+    /// Whether audio is actually flowing yet. The hotkey arms a recording immediately, but the
+    /// capture engine can take up to a second to deliver its first buffer, and anything said in
+    /// that gap is lost. The indicator must not claim to be listening before it is.
+    var isCapturing: Bool = false
     /// What the transcriber is hearing so far, shown while you are still speaking.
     var livePreviewText: String = ""
     var sourceAppBundleID: String?
@@ -106,6 +110,15 @@ struct TranscriptionFeature {
       case let .audioLevelUpdated(meter):
         state.meter = meter
         state.speech.ingest(averagePower: meter.averagePower)
+        // Metering only flows while the capture engine has an active recording, so the first
+        // frame after a start is real proof that audio is arriving.
+        if state.isRecording, !state.isCapturing {
+          state.isCapturing = true
+          let startup = state.recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+          transcriptionFeatureLogger.notice(
+            "Capture is live \(String(format: "%.2f", startup))s after the hotkey"
+          )
+        }
         return .none
 
       case let .livePreviewUpdated(text):
@@ -354,6 +367,7 @@ private extension TranscriptionFeature {
     let startTime = now
     state.recordingStartTime = startTime
     state.speech.reset()
+    state.isCapturing = false
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -775,7 +789,8 @@ struct TranscriptionView: View {
       meter: store.meter,
       speech: store.speech,
       recordingStartedAt: store.recordingStartTime,
-      liveText: store.livePreviewText
+      liveText: store.livePreviewText,
+      isCapturing: store.isCapturing
     )
     .task {
       await store.send(.task).finish()

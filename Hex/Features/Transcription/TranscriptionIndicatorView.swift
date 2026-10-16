@@ -29,6 +29,12 @@ struct TranscriptionIndicatorView: View {
   var recordingStartedAt: Date?
   /// What the transcriber is hearing so far, shown while you are still speaking.
   var liveText: String = ""
+  /// Whether audio is actually flowing yet — see `TranscriptionFeature.State.isCapturing`.
+  var isCapturing: Bool = true
+
+  /// The engine has been asked to record but has not delivered a frame yet, so nothing said
+  /// right now would be kept.
+  private var isWaitingForAudio: Bool { status == .recording && !isCapturing }
 
   let transcribeBaseColor: Color = .blue
   private var backgroundColor: Color {
@@ -36,6 +42,8 @@ struct TranscriptionIndicatorView: View {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.black
     case .recording:
+      // Neutral until audio actually arrives, so "armed" never looks like "listening".
+      guard !isWaitingForAudio else { return Color(nsColor: mixedNSColor(.gray, with: .black, by: 0.65)) }
       return mixedColor(mixedNSColor(.red, with: .black, by: 0.5), with: .red, by: meter.averagePower * 3)
     case .transcribing: return mixedColor(.blue, with: .black, by: 0.5)
     case .prewarming: return mixedColor(.blue, with: .black, by: 0.5)
@@ -46,7 +54,9 @@ struct TranscriptionIndicatorView: View {
     switch status {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.black
-    case .recording: return mixedColor(.red, with: .white, by: 0.1).opacity(0.6)
+    case .recording:
+      guard !isWaitingForAudio else { return Color.white.opacity(0.25) }
+      return mixedColor(.red, with: .white, by: 0.1).opacity(0.6)
     case .transcribing: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     case .prewarming: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     }
@@ -79,13 +89,26 @@ struct TranscriptionIndicatorView: View {
     status == .hidden
   }
 
-  /// Nothing speech-like for a couple of seconds of recording is nearly always the microphone
-  /// (wrong device, muted, unplugged) rather than a quiet room. Only fires when nothing has
-  /// been heard at all, so pausing mid-sentence never triggers it.
-  private var hint: String? {
-    guard status == .recording, !speech.hasSpoken, let startedAt = recordingStartedAt else { return nil }
-    return Date().timeIntervalSince(startedAt) > 2.5 ? "Not hearing you" : nil
+  /// The status line is present for the whole recording and never goes blank, so an empty line
+  /// means the indicator itself is broken rather than "nothing to say yet". A three-step
+  /// progression, so it never claims more than it knows:
+  /// not listening yet → listening but nothing heard → words are arriving.
+  private var statusLine: String? {
+    guard status == .recording else { return nil }
+    if isWaitingForAudio { return "Not listening yet" }
+    if !liveText.isEmpty { return liveText }
+    // Nothing speech-like for a couple of seconds is nearly always the microphone (wrong
+    // device, muted, unplugged) rather than a quiet room. Only fires when nothing has been
+    // heard at all, so pausing mid-sentence never triggers it.
+    if !speech.hasSpoken, let startedAt = recordingStartedAt,
+       Date().timeIntervalSince(startedAt) > 2.5 {
+      return "Not hearing you"
+    }
+    return "Listening\u{2026}"
   }
+
+  /// Placeholder states are shown dimmed so real transcribed words stand out from status.
+  private var statusLineIsPlaceholder: Bool { liveText.isEmpty }
 
   @State var transcribeEffect = 0
 
@@ -149,8 +172,8 @@ struct TranscriptionIndicatorView: View {
         // Overlays rather than siblings inside the ZStack: a sibling grows the ZStack, which
         // pushed the capsule off centre whenever text appeared.
         .overlay(alignment: .top) {
-          if let message = status == .prewarming ? "Model prewarming..." : hint {
-            Text(message)
+          if status == .prewarming {
+            Text("Model prewarming...")
               .font(.system(size: 12, weight: .medium))
               .foregroundColor(.white)
               .fixedSize()
@@ -161,14 +184,15 @@ struct TranscriptionIndicatorView: View {
               .transition(.opacity)
           }
         }
-        // The words themselves. This is the whole point of the indicator: a level meter and a
-        // colour can only say "something is loud", not "I am getting your words". Head
-        // truncation because the rolling window keeps the most recent words at the end.
+        // The words themselves, or the current state when there are none yet. This is the whole
+        // point of the indicator: a level meter and a colour can only say "something is loud",
+        // not "I am getting your words". Head truncation because the rolling window keeps the
+        // most recent words at the end.
         .overlay(alignment: .bottom) {
-          if status == .recording, !liveText.isEmpty {
-            Text(liveText)
+          if let statusLine {
+            Text(statusLine)
               .font(.system(size: 13))
-              .foregroundColor(.white)
+              .foregroundColor(statusLineIsPlaceholder ? Color.white.opacity(0.65) : .white)
               .lineLimit(2)
               .multilineTextAlignment(.center)
               .truncationMode(.head)
@@ -187,7 +211,7 @@ struct TranscriptionIndicatorView: View {
           }
         }
     }
-    .animation(.easeInOut(duration: 0.15), value: hint)
+    .animation(.easeInOut(duration: 0.15), value: statusLine)
     .animation(.easeInOut(duration: 0.15), value: liveText.isEmpty)
     .enableInjection()
   }
