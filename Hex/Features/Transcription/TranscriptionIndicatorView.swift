@@ -146,51 +146,46 @@ struct TranscriptionIndicatorView: View {
         .changeEffect(.glow(color: .red.opacity(0.5), radius: 8), value: status)
         .changeEffect(.shine(angle: .degrees(0), duration: 0.6), value: transcribeEffect)
         .compositingGroup()
+        // Overlays rather than siblings inside the ZStack: a sibling grows the ZStack, which
+        // pushed the capsule off centre whenever text appeared.
+        .overlay(alignment: .top) {
+          if let message = status == .prewarming ? "Model prewarming..." : hint {
+            Text(message)
+              .font(.system(size: 12, weight: .medium))
+              .foregroundColor(.white)
+              .fixedSize()
+              .padding(.horizontal, 8)
+              .padding(.vertical, 4)
+              .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.8)))
+              .offset(y: -30)
+              .transition(.opacity)
+          }
+        }
+        // The words themselves. This is the whole point of the indicator: a level meter and a
+        // colour can only say "something is loud", not "I am getting your words". Head
+        // truncation because the rolling window keeps the most recent words at the end.
+        .overlay(alignment: .bottom) {
+          if status == .recording, !liveText.isEmpty {
+            Text(liveText)
+              .font(.system(size: 13))
+              .foregroundColor(.white)
+              .lineLimit(2)
+              .multilineTextAlignment(.center)
+              .truncationMode(.head)
+              .frame(maxWidth: 460)
+              .padding(.horizontal, 10)
+              .padding(.vertical, 6)
+              .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.75)))
+              .offset(y: 34)
+              .transition(.opacity)
+          }
+        }
         .task(id: status == .transcribing) {
           while status == .transcribing, !Task.isCancelled {
             transcribeEffect += 1
             try? await Task.sleep(for: .seconds(0.25))
           }
         }
-
-      // Tooltip above the capsule: prewarming status, or a dead-microphone warning.
-      if let message = status == .prewarming ? "Model prewarming..." : hint {
-        VStack(spacing: 4) {
-          Text(message)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-              RoundedRectangle(cornerRadius: 4)
-                .fill(Color.black.opacity(0.8))
-            )
-        }
-        .offset(y: -24)
-        .transition(.opacity)
-        .zIndex(2)
-      }
-
-      // The words themselves. This is the whole point of the indicator: a level meter and a
-      // colour can only say "something is loud", not "I am getting your words".
-      if status == .recording, !liveText.isEmpty {
-        Text(liveText)
-          .font(.system(size: 13))
-          .foregroundColor(.white)
-          .lineLimit(2)
-          .multilineTextAlignment(.center)
-          .truncationMode(.head)
-          .frame(maxWidth: 460)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 6)
-          .background(
-            RoundedRectangle(cornerRadius: 6)
-              .fill(Color.black.opacity(0.75))
-          )
-          .offset(y: 28)
-          .transition(.opacity)
-          .zIndex(3)
-      }
     }
     .animation(.easeInOut(duration: 0.15), value: hint)
     .animation(.easeInOut(duration: 0.15), value: liveText.isEmpty)

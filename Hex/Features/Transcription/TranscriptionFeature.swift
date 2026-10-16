@@ -70,7 +70,7 @@ struct TranscriptionFeature {
     case recordingStart
     case recordingCleanup
     case transcription
-    case livePreview
+    case livePreviewSamples
   }
 
   @Dependency(\.transcription) var transcription
@@ -89,14 +89,16 @@ struct TranscriptionFeature {
       // MARK: - Lifecycle / Setup
 
       case .task:
-        // Starts two concurrent effects:
+        // Starts long-lived effects:
         // 1) Observing audio meter
         // 2) Monitoring hot key events
         // 3) Priming the recorder for instant startup
+        // 4) Forwarding microphone samples to the live transcription preview
         return .merge(
           startMeteringEffect(),
           startHotKeyMonitoringEffect(),
-          warmUpRecorderEffect()
+          warmUpRecorderEffect(),
+          startSampleForwardingEffect()
         )
 
       // MARK: - Metering
@@ -284,19 +286,33 @@ private extension TranscriptionFeature {
     }
   }
 
-  /// Streams microphone audio into the preview decoder while the user is speaking, so words
-  /// appear as they are said rather than only after the recording is finished.
-  func livePreviewEffect() -> Effect<Action> {
+  /// Feeds microphone audio to the preview decoder for the lifetime of the app, the same way
+  /// metering is subscribed once. The preview itself decides whether to accumulate anything,
+  /// so there is exactly one long-lived consumer of the sample stream and no per-recording
+  /// subscribe/unsubscribe to get wrong.
+  func startSampleForwardingEffect() -> Effect<Action> {
+    .run { _ in
+      for await samples in await recording.observeAudioSamples() {
+        await livePreview.append(samples)
+      }
+    }
+    .cancellable(id: CancelID.livePreviewSamples, cancelInFlight: true)
+  }
+
+  /// Begins a preview session so words appear as they are said rather than only once the
+  /// recording is finished.
+  func beginLivePreviewEffect() -> Effect<Action> {
     .run { send in
       await livePreview.begin { text in
         await send(.livePreviewUpdated(text))
       }
-      for await samples in await recording.observeAudioSamples() {
-        await livePreview.append(samples)
-      }
+    }
+  }
+
+  func endLivePreviewEffect() -> Effect<Action> {
+    .run { _ in
       await livePreview.end()
     }
-    .cancellable(id: CancelID.livePreview, cancelInFlight: true)
   }
 
   func warmUpRecorderEffect() -> Effect<Action> {
@@ -349,7 +365,7 @@ private extension TranscriptionFeature {
     // Prevent system sleep during recording
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
-      livePreviewEffect(),
+      beginLivePreviewEffect(),
       .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
@@ -409,7 +425,7 @@ private extension TranscriptionFeature {
 
     return .merge(
       .cancel(id: CancelID.recordingStart),
-      .cancel(id: CancelID.livePreview),
+      endLivePreviewEffect(),
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -692,7 +708,7 @@ private extension TranscriptionFeature {
     return .concatenate(
       .cancel(id: CancelID.transcription),
       .cancel(id: CancelID.recordingStart),
-      .cancel(id: CancelID.livePreview),
+      endLivePreviewEffect(),
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -720,7 +736,7 @@ private extension TranscriptionFeature {
     // Silently discard - no sound effect
     return .merge(
       .cancel(id: CancelID.recordingStart),
-      .cancel(id: CancelID.livePreview),
+      endLivePreviewEffect(),
       .run { [sleepManagement] _ in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
