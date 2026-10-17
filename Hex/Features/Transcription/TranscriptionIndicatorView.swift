@@ -113,6 +113,18 @@ struct TranscriptionIndicatorView: View {
   /// Placeholder states are shown dimmed so real transcribed words stand out from status.
   private var statusLineIsPlaceholder: Bool { liveText.isEmpty }
 
+  /// Width the bubble needs to hug its text, capped so long lines wrap instead of running off
+  /// screen.
+  ///
+  /// Measured with AppKit rather than expressed as a `maxWidth`, because SwiftUI sizes a `Text`
+  /// to whatever it is proposed: inside a full-width stack the proposal is the whole screen, so
+  /// `maxWidth: 520` always resolved to 520 and even "Listening…" filled a 520pt bar.
+  private func bubbleWidth(for line: String) -> CGFloat {
+    let font = NSFont.systemFont(ofSize: 13)
+    let singleLineWidth = (line as NSString).size(withAttributes: [.font: font]).width
+    return min(max(singleLineWidth, 60), 520)
+  }
+
   /// Two-tone when there are real words: what just arrived at full brightness, everything
   /// carried over from the previous decode dimmed behind it.
   private func statusText(_ line: String) -> Text {
@@ -224,7 +236,7 @@ struct TranscriptionIndicatorView: View {
             .multilineTextAlignment(.center)
             .truncationMode(.head)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 520)
+            .frame(width: bubbleWidth(for: statusLine))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.75)))
