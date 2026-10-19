@@ -57,6 +57,9 @@ private struct SuperFastCaptureConstants {
   static let ringBufferDuration: TimeInterval = 1.0
   static let defaultPreRollDuration: TimeInterval = 0.45
   static let tapBufferSize: AVAudioFrameCount = 2_048
+  /// How often appended audio is flushed and the WAV header patched. An fsync per 40 ms buffer
+  /// would be a lot of syscalls for little gain; one second bounds what a power loss can cost.
+  static let checkpointInterval: TimeInterval = 1.0
   static let fallbackStopGracePeriod: TimeInterval = 0.05
   static let minimumStopGracePeriod: TimeInterval = 0.02
   static let maximumStopGracePeriod: TimeInterval = 0.08
@@ -97,10 +100,11 @@ final class SuperFastCaptureController {
 
   private struct ActiveRecording {
     let url: URL
-    let file: AVAudioFile
+    let writer: DurableAudioWriter
     let requestedAt: Date
     let prependedDuration: TimeInterval
     var didLogFirstBuffer: Bool
+    var lastCheckpointAt: Date
   }
 
   private let logger = HexLog.recording
@@ -275,6 +279,8 @@ final class SuperFastCaptureController {
       captureGeneration += 1
       converter = nil
       if clearingRecordingState {
+        // Tearing down with a recording still open must not leave its header stale.
+        try? activeRecording?.writer.finish()
         activeRecording = nil
         recordingFailure = nil
         ringBuffer.clear()
@@ -310,38 +316,30 @@ final class SuperFastCaptureController {
     processingQueue.sync {
       do {
         recordingFailure = nil
-        let file = try AVAudioFile(
-          forWriting: url,
-          settings: [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: SuperFastCaptureConstants.sampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: true,
-          ],
-          commonFormat: .pcmFormatFloat32,
-          interleaved: false
-        )
+        // A writer that keeps the file a readable WAV at every instant, rather than only once
+        // it is closed, so a crash or a force quit cannot strand audio behind a header that
+        // reports zero frames.
+        let writer = try DurableAudioWriter(url: url)
 
         let preRollDuration = mode.preRollDuration
         let preRollFrameCount = Int(preRollDuration * SuperFastCaptureConstants.sampleRate)
         let preRollSamples = ringBuffer.recentSamples(count: preRollFrameCount)
         let prependedDuration = Double(preRollSamples.count) / SuperFastCaptureConstants.sampleRate
         if !preRollSamples.isEmpty {
-          try write(samples: preRollSamples, to: file)
+          try writer.append(preRollSamples)
         }
+        try writer.checkpoint()
 
         logger.notice(
           "Capture engine recording file opened prepended=\(String(format: "%.3f", prependedDuration))s requestedPreRoll=\(String(format: "%.3f", preRollDuration))s"
         )
         activeRecording = ActiveRecording(
           url: url,
-          file: file,
+          writer: writer,
           requestedAt: requestedAt,
           prependedDuration: prependedDuration,
-          didLogFirstBuffer: false
+          didLogFirstBuffer: false,
+          lastCheckpointAt: Date()
         )
       } catch {
         startError = error
@@ -355,9 +353,30 @@ final class SuperFastCaptureController {
 
   func finishRecording(clearBuffer: Bool = true) -> FinishRecordingResult {
     processingQueue.sync {
+      // Finalise the header before dropping the writer. Without this the audio since the last
+      // checkpoint would be on disk but undeclared, which is exactly the tail loss the durable
+      // writer exists to prevent.
+      var finalisationFailed = false
+      if let recording = activeRecording {
+        do {
+          try recording.writer.finish()
+        } catch {
+          // The bytes are on disk; only the declared sizes are in doubt. Recompute them from the
+          // real length rather than discarding a recording that is otherwise intact.
+          logger.error(
+            "Failed to finalise recording file: \(error.localizedDescription); repairing from length"
+          )
+          if (try? DurableAudioWriter.repairHeader(at: recording.url)) == nil {
+            finalisationFailed = true
+          }
+        }
+      }
+
       let result: FinishRecordingResult
       if let recordingFailure {
         result = .failed(recordingFailure)
+      } else if finalisationFailed {
+        result = .failed(.captureWriteFailed("The recording file could not be finalised."))
       } else if let url = activeRecording?.url {
         result = .captured(url)
       } else {
@@ -402,30 +421,39 @@ final class SuperFastCaptureController {
       ringBuffer.append(UnsafeBufferPointer(start: samples, count: sampleCount))
     }
 
-    if activeRecording != nil {
-      meterContinuation.yield(meter(for: samples, count: sampleCount))
-      // Raw audio for the live preview, which re-decodes a rolling window of it. Copied
-      // because the pointer only lives for the duration of this callback.
-      samplesContinuation.yield(Array(UnsafeBufferPointer(start: samples, count: sampleCount)))
-    }
-
     guard var recording = activeRecording else { return }
+
+    // One copy, used both for the live preview and for the file. The pointer only lives for the
+    // duration of this callback.
+    let samplesArray = Array(UnsafeBufferPointer(start: samples, count: sampleCount))
+    meterContinuation.yield(meter(for: samples, count: sampleCount))
+    samplesContinuation.yield(samplesArray)
+
     if !recording.didLogFirstBuffer {
       let timeToFirstBuffer = Date().timeIntervalSince(recording.requestedAt)
       logger.notice(
         "Capture engine first buffer latency=\(String(format: "%.3f", timeToFirstBuffer))s prepended=\(String(format: "%.3f", recording.prependedDuration))s frames=\(sampleCount)"
       )
       recording.didLogFirstBuffer = true
-      activeRecording = recording
     }
 
     do {
-      try recording.file.write(from: converted)
+      try recording.writer.append(samplesArray)
+      let now = Date()
+      if now.timeIntervalSince(recording.lastCheckpointAt) >= SuperFastCaptureConstants.checkpointInterval {
+        try recording.writer.checkpoint()
+        recording.lastCheckpointAt = now
+      }
+      activeRecording = recording
     } catch {
+      // Keep the file: it is a readable WAV holding everything written so far, and the next
+      // launch's recovery will pick it up. Deleting it would destroy exactly what this writer
+      // exists to protect. Recording does stop here, but the feature is not told until stop, so
+      // the indicator keeps claiming to record until then — see the disk-full gap in the notes.
       logger.error("Failed to write capture engine audio: \(error.localizedDescription)")
+      try? recording.writer.finish()
       activeRecording = nil
       recordingFailure = .captureWriteFailed(error.localizedDescription)
-      FileManager.default.removeItemIfExists(at: recording.url)
     }
   }
 
@@ -467,22 +495,6 @@ final class SuperFastCaptureController {
     @unknown default:
       return nil
     }
-  }
-
-  private func write(samples: [Float], to file: AVAudioFile) throws {
-    guard !samples.isEmpty,
-          let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AVAudioFrameCount(samples.count)),
-          let channelData = buffer.floatChannelData?[0]
-    else {
-      return
-    }
-
-    buffer.frameLength = AVAudioFrameCount(samples.count)
-    samples.withUnsafeBufferPointer { sampleBuffer in
-      guard let baseAddress = sampleBuffer.baseAddress else { return }
-      channelData.update(from: baseAddress, count: sampleBuffer.count)
-    }
-    try file.write(from: buffer)
   }
 
   private func meter(for samples: UnsafePointer<Float>, count: Int) -> Meter {

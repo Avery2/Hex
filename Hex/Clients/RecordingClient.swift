@@ -376,7 +376,11 @@ actor RecordingClientLive {
   }
 
   private var recorder: AVAudioRecorder?
-  private let recordingURL = FileManager.default.temporaryDirectory.appendingPathComponent("recording.wav")
+  /// Per-session and uniquely named, matching the pattern the stranded-recording recovery looks
+  /// for. A fixed `recording.wav` was invisible to recovery and the next session silently
+  /// overwrote it, so a fallback-backend recording had no durability at all.
+  private var recordingURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("hex-capture-\(UUID().uuidString).wav")
   private var isRecorderPrimedForNextSession = false
   private var lastPrimedDeviceID: AudioDeviceID?
   private var recordingSessionID: UUID?
@@ -1621,6 +1625,10 @@ actor RecordingClientLive {
       return recorder
     }
 
+    // A fresh name per session, so a crash leaves a file recovery can find and no later session
+    // can overwrite it.
+    recordingURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("hex-capture-\(UUID().uuidString).wav")
     let recorder = try AVAudioRecorder(url: recordingURL, settings: recorderSettings)
     recorder.isMeteringEnabled = true
     self.recorder = recorder

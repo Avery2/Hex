@@ -31,6 +31,8 @@ struct TranscriptionFeature {
     /// capture engine can take up to a second to deliver its first buffer, and anything said in
     /// that gap is lost. The indicator must not claim to be listening before it is.
     var isCapturing: Bool = false
+    /// Set briefly when a long recording ends, so its end is acknowledged rather than silent.
+    var sessionSummary: String?
     /// When audio actually started flowing, so the "nothing heard" warning is measured from
     /// there rather than from the hotkey press — otherwise engine startup time counts against
     /// the user and the warning fires before they have had a chance to speak.
@@ -46,6 +48,7 @@ struct TranscriptionFeature {
   enum Action {
     case task
     case audioLevelUpdated(Meter)
+    case sessionSummaryExpired
 
     // Hotkey actions
     case hotKeyPressed
@@ -76,7 +79,12 @@ struct TranscriptionFeature {
     case recordingCleanup
     case transcription
     case livePreviewSamples
+    case sessionSummary
   }
+
+  /// Past this length a capture has stopped being dictation and become a session whose loss
+  /// would matter, so its end gets a distinct acknowledgement and a visible confirmation.
+  static let sessionDurationThreshold: TimeInterval = 30
 
   @Dependency(\.transcription) var transcription
   @Dependency(\.recording) var recording
@@ -107,6 +115,10 @@ struct TranscriptionFeature {
         )
 
       // MARK: - Metering
+
+      case .sessionSummaryExpired:
+        state.sessionSummary = nil
+        return .none
 
       case let .audioLevelUpdated(meter):
         state.meter = meter
@@ -325,6 +337,26 @@ private extension TranscriptionFeature {
     }
   }
 
+  /// Clears the session-ended confirmation after long enough to be noticed.
+  func sessionSummaryExpiryEffect() -> Effect<Action> {
+    .run { send in
+      try? await Task.sleep(for: .seconds(8))
+      await send(.sessionSummaryExpired)
+    }
+    .cancellable(id: CancelID.sessionSummary, cancelInFlight: true)
+  }
+
+  static func sessionSummaryText(duration: TimeInterval) -> String {
+    let total = Int(duration.rounded())
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let seconds = total % 60
+    let clock = hours > 0
+      ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+      : String(format: "%d:%02d", minutes, seconds)
+    return "Session ended \u{00B7} \(clock)"
+  }
+
   func warmUpRecorderEffect() -> Effect<Action> {
     .run { _ in
       await recording.warmUpRecorder()
@@ -366,6 +398,7 @@ private extension TranscriptionFeature {
     state.speech.reset()
     state.isCapturing = false
     state.listeningSince = nil
+    state.sessionSummary = nil
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -377,6 +410,7 @@ private extension TranscriptionFeature {
     // Prevent system sleep during recording
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
+      .cancel(id: CancelID.sessionSummary),
       beginLivePreviewEffect(),
       .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
         // Play sound immediately for instant feedback
@@ -434,20 +468,27 @@ private extension TranscriptionFeature {
     state.error = nil
     state.isPrewarming = true
 
+    // A session's end is worth announcing; a two-word dictation's is not.
+    let isSession = duration >= Self.sessionDurationThreshold
+    if isSession {
+      state.sessionSummary = Self.sessionSummaryText(duration: duration)
+    }
+
     return .merge(
       .cancel(id: CancelID.recordingStart),
       endLivePreviewEffect(),
+      isSession ? sessionSummaryExpiryEffect() : .none,
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
 
         // Play the cue immediately: stopping now holds capture open briefly to catch the tail,
         // and the sound is the user's signal that recording has ended.
-        soundEffect.play(.stopRecording)
+        soundEffect.play(isSession ? .sessionEnded : .stopRecording)
 
-        // Note: the captured file is deliberately not deleted on any exit path. A failed
-        // or superseded transcription used to destroy the recording; now the audio is
-        // either handed to persistence or swept up by the orphan cleanup on next launch.
+        // The stop path never deletes the captured file: a failed or superseded transcription
+        // used to destroy the recording. Audio is handed to persistence, or left in the temp
+        // directory for the next launch's recovery to pick up.
         let stopResult = await recording.stopRecording()
         switch stopResult {
         case let .captured(url):
@@ -545,11 +586,15 @@ private extension TranscriptionFeature {
       }
     }
 
-    // If empty text, nothing else to do
+    // Empty text is not a reason to destroy a recording. For a session it is the case where
+    // the audio is the only remaining copy of what was said, so it is kept with no text.
     guard !result.isEmpty else {
-      return .run { _ in
-        FileManager.default.removeItemIfExists(at: audioURL)
-      }
+      return preserveTextlessRecordingEffect(
+        &state,
+        audioURL: audioURL,
+        duration: duration,
+        reason: "transcription produced no text"
+      )
     }
 
     transcriptionFeatureLogger.info("Raw transcription: '\(result, privacy: .private)'")
@@ -585,10 +630,14 @@ private extension TranscriptionFeature {
       modifiedResult = formattedResult
     }
 
+    // Word removal or formatting emptied the text; the audio is still what was said.
     guard !modifiedResult.isEmpty else {
-      return .run { _ in
-        FileManager.default.removeItemIfExists(at: audioURL)
-      }
+      return preserveTextlessRecordingEffect(
+        &state,
+        audioURL: audioURL,
+        duration: duration,
+        reason: "text was emptied by word removal or formatting"
+      )
     }
 
     let sourceAppBundleID = state.sourceAppBundleID
@@ -608,6 +657,49 @@ private extension TranscriptionFeature {
         )
       } catch {
         await send(.transcriptionError(error, audioURL, duration))
+      }
+    }
+    .cancellable(id: CancelID.transcription)
+  }
+
+  /// Keeps a recording whose transcript came back empty, but only once it is long enough to be
+  /// a session rather than an accidental tap. Below that threshold nothing was said, so the
+  /// file is removed and no empty history entry is created.
+  func preserveTextlessRecordingEffect(
+    _ state: inout State,
+    audioURL: URL,
+    duration: TimeInterval,
+    reason: String
+  ) -> Effect<Action> {
+    guard duration >= Self.sessionDurationThreshold else {
+      return .run { _ in
+        FileManager.default.removeItemIfExists(at: audioURL)
+      }
+    }
+
+    transcriptionFeatureLogger.notice(
+      "Keeping a \(String(format: "%.0f", duration))s recording because \(reason)"
+    )
+
+    let sourceAppBundleID = state.sourceAppBundleID
+    let sourceAppName = state.sourceAppName
+    let transcriptionHistory = state.$transcriptionHistory
+
+    return .run { _ in
+      do {
+        try await finalizeRecordingAndStoreTranscript(
+          result: "",
+          duration: duration,
+          sourceAppBundleID: sourceAppBundleID,
+          sourceAppName: sourceAppName,
+          audioURL: audioURL,
+          status: .failed,
+          transcriptionHistory: transcriptionHistory
+        )
+      } catch {
+        transcriptionFeatureLogger.error(
+          "Could not preserve textless recording: \(error.localizedDescription)"
+        )
       }
     }
     .cancellable(id: CancelID.transcription)
@@ -768,10 +860,14 @@ struct TranscriptionView: View {
   @Shared(.livePreview) var livePreview: LivePreviewSnapshot
 
   var status: TranscriptionIndicatorView.Status {
-    if store.isTranscribing {
-      return .transcribing
-    } else if store.isRecording {
+    if store.isRecording {
       return .recording
+    } else if store.sessionSummary != nil {
+      // Takes precedence over the transcribing state: the acknowledgement that the session
+      // ended and was saved matters more than the progress of the transcription.
+      return .sessionEnded
+    } else if store.isTranscribing {
+      return .transcribing
     } else if store.isPrewarming {
       return .prewarming
     } else {
@@ -787,6 +883,7 @@ struct TranscriptionView: View {
       recordingStartedAt: store.listeningSince,
       liveText: livePreview.text,
       liveTextCarriedOver: livePreview.carriedOverCharacters,
+      sessionSummary: store.sessionSummary,
       isCapturing: store.isCapturing
     )
     .task {

@@ -10,6 +10,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	var settingsWindow: NSWindow?
 	var statusItem: NSStatusItem!
 	private var launchedAtLogin = false
+	/// Guards against `applicationShouldTerminate` being asked again while the in-flight
+	/// recording is being finalised, which would otherwise loop forever.
+	private var isFinalisingRecordingForQuit = false
 
 	@Dependency(\.soundEffects) var soundEffect
 	@Dependency(\.recording) var recording
@@ -113,6 +116,18 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	private func recoverStrandedRecordings(_ recordings: [StrandedRecordingRecovery.StrandedRecording]) {
 		guard !recordings.isEmpty else { return }
 		appLogger.notice("Recovering \(recordings.count) recording(s) stranded by a previous session")
+		// A recording that ended badly may still carry a header that was never finalised, so
+		// recompute it from the bytes on disk before anything tries to read the file.
+		for recording in recordings {
+			do {
+				guard let duration = try DurableAudioWriter.repairHeader(at: recording.url) else { continue }
+				appLogger.notice(
+					"Repaired stranded recording \(recording.url.lastPathComponent) duration=\(String(format: "%.1f", duration))s"
+				)
+			} catch {
+				appLogger.error("Could not repair stranded recording: \(error.localizedDescription)")
+			}
+		}
 		HexApp.appStore.send(.recoverStrandedRecordings(recordings))
 	}
 
@@ -176,6 +191,23 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {
 		presentSettingsView()
 		return true
+	}
+
+	/// A quit must never be able to throw away a recording. When one is in flight the file is
+	/// finalised first — which makes it a readable WAV that the next launch's recovery picks up
+	/// and transcribes — and only then does the app exit. Quitting is delayed, never refused.
+	func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+		guard !isFinalisingRecordingForQuit else { return .terminateNow }
+		guard HexApp.appStore.state.transcription.isRecording else { return .terminateNow }
+
+		isFinalisingRecordingForQuit = true
+		appLogger.notice("Quit requested during a recording; finalising the file before exiting")
+		let recording = self.recording
+		Task { @MainActor in
+			_ = await recording.stopRecording()
+			NSApp.terminate(nil)
+		}
+		return .terminateLater
 	}
 
 	func applicationWillTerminate(_: Notification) {

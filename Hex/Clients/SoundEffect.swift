@@ -19,6 +19,9 @@ public enum SoundEffect: String, CaseIterable {
   case startRecording
   case stopRecording
   case cancel
+  /// Distinct from the short start/stop blips so the end of a long session is unmistakable
+  /// even from across the room.
+  case sessionEnded
 
   public var fileName: String {
     self.rawValue

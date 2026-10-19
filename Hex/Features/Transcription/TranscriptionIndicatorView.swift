@@ -19,6 +19,8 @@ struct TranscriptionIndicatorView: View {
     case recording
     case transcribing
     case prewarming
+    /// A long recording has ended and been saved; shown briefly so its end is never silent.
+    case sessionEnded
   }
 
   var status: Status
@@ -32,6 +34,8 @@ struct TranscriptionIndicatorView: View {
   /// Leading characters of `liveText` that were already there on the previous decode. The rest
   /// is what just arrived, and is drawn brighter so the eye lands on the newest words.
   var liveTextCarriedOver: Int = 0
+  /// Confirmation text shown while the session-ended state is on screen.
+  var sessionSummary: String?
   /// Whether audio is actually flowing yet — see `TranscriptionFeature.State.isCapturing`.
   var isCapturing: Bool = true
 
@@ -46,6 +50,7 @@ struct TranscriptionIndicatorView: View {
       return mixedColor(mixedNSColor(.red, with: .black, by: 0.5), with: .red, by: meter.averagePower * 3)
     case .transcribing: return mixedColor(.blue, with: .black, by: 0.5)
     case .prewarming: return mixedColor(.blue, with: .black, by: 0.5)
+    case .sessionEnded: return mixedColor(.green, with: .black, by: 0.55)
     }
   }
 
@@ -58,6 +63,7 @@ struct TranscriptionIndicatorView: View {
       return mixedColor(.red, with: .white, by: 0.1).opacity(0.6)
     case .transcribing: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     case .prewarming: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
+    case .sessionEnded: return mixedColor(.green, with: .white, by: 0.1).opacity(0.6)
     }
   }
 
@@ -77,6 +83,7 @@ struct TranscriptionIndicatorView: View {
     case .recording: return Color.red
     case .transcribing: return transcribeBaseColor
     case .prewarming: return transcribeBaseColor
+    case .sessionEnded: return .green
     }
   }
 
@@ -97,6 +104,7 @@ struct TranscriptionIndicatorView: View {
   /// progression, so it never claims more than it knows:
   /// not listening yet → listening but nothing heard → words are arriving.
   private var statusLine: String? {
+    if status == .sessionEnded { return sessionSummary }
     guard status == .recording else { return nil }
     if isWaitingForAudio { return "Not listening yet" }
     if !liveText.isEmpty { return liveText }
@@ -111,7 +119,10 @@ struct TranscriptionIndicatorView: View {
   }
 
   /// Placeholder states are shown dimmed so real transcribed words stand out from status.
-  private var statusLineIsPlaceholder: Bool { liveText.isEmpty }
+  /// The session-ended confirmation is not a placeholder — it is the whole message.
+  private var statusLineIsPlaceholder: Bool {
+    liveText.isEmpty && status != .sessionEnded
+  }
 
   /// Width the bubble needs to hug its text, capped so long lines wrap instead of running off
   /// screen.
@@ -195,7 +206,7 @@ struct TranscriptionIndicatorView: View {
           )
           .animation(.interactiveSpring(), value: meter)
           .frame(
-            width: status == .recording ? expandedWidth : baseWidth,
+            width: status == .recording || status == .sessionEnded ? expandedWidth : baseWidth,
             height: baseWidth
           )
           .opacity(status == .hidden ? 0 : 1)
