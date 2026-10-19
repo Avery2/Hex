@@ -21,3 +21,6 @@ node_modules/
 
 # Claude
 .claude/
+
+# Local fork build output (scripts/install-fork.sh)
+.build-fork/

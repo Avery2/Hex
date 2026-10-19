@@ -852,10 +852,18 @@ private extension TranscriptionFeature {
     state.isRecording = false
     state.isPrewarming = false
 
+    // ESC keeps the recording either way. For a session it should also say so, rather than
+    // playing the short cancel blip and looking like the take was thrown away.
+    let isSession = duration >= Self.sessionDurationThreshold
+    if isSession {
+      state.sessionSummary = Self.sessionSummaryText(duration: duration)
+    }
+
     return .concatenate(
       .cancel(id: CancelID.transcription),
       .cancel(id: CancelID.recordingStart),
       endLivePreviewEffect(),
+      isSession ? sessionSummaryExpiryEffect() : .none,
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -865,7 +873,7 @@ private extension TranscriptionFeature {
         }
         // Stop the recording to release microphone access, keeping the audio.
         let result = await recording.stopRecording()
-        soundEffect.play(.cancel)
+        soundEffect.play(isSession ? .sessionEnded : .cancel)
 
         guard case let .captured(url) = result else { return }
         guard !Task.isCancelled else { return }
