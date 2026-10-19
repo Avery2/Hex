@@ -132,15 +132,20 @@ final class SuperFastCaptureController {
   private var recentCallbackIntervals: [TimeInterval] = []
   private var recentBufferDurations: [TimeInterval] = []
   private let onEngineConfigurationChange: @Sendable (Int) -> Void
+  /// Surfaces a write failure immediately. Without this a full disk stops recording silently
+  /// and the user only discovers it when they stop talking.
+  private let onRecordingFailure: @Sendable (String) -> Void
 
   init(
     meterContinuation: AsyncStream<Meter>.Continuation,
     samplesContinuation: AsyncStream<[Float]>.Continuation,
-    onEngineConfigurationChange: @escaping @Sendable (Int) -> Void
+    onEngineConfigurationChange: @escaping @Sendable (Int) -> Void,
+    onRecordingFailure: @escaping @Sendable (String) -> Void
   ) {
     self.meterContinuation = meterContinuation
     self.samplesContinuation = samplesContinuation
     self.onEngineConfigurationChange = onEngineConfigurationChange
+    self.onRecordingFailure = onRecordingFailure
   }
 
   deinit {
@@ -454,6 +459,7 @@ final class SuperFastCaptureController {
       try? recording.writer.finish()
       activeRecording = nil
       recordingFailure = .captureWriteFailed(error.localizedDescription)
+      onRecordingFailure(error.localizedDescription)
     }
   }
 

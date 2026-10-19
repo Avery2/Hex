@@ -21,6 +21,8 @@ struct TranscriptionIndicatorView: View {
     case prewarming
     /// A long recording has ended and been saved; shown briefly so its end is never silent.
     case sessionEnded
+    /// Recording stopped because the disk refused a write.
+    case failed
   }
 
   var status: Status
@@ -36,6 +38,8 @@ struct TranscriptionIndicatorView: View {
   var liveTextCarriedOver: Int = 0
   /// Confirmation text shown while the session-ended state is on screen.
   var sessionSummary: String?
+  /// Shown instead of the session confirmation when recording had to stop on a write failure.
+  var failureMessage: String?
   /// Whether audio is actually flowing yet — see `TranscriptionFeature.State.isCapturing`.
   var isCapturing: Bool = true
 
@@ -51,6 +55,7 @@ struct TranscriptionIndicatorView: View {
     case .transcribing: return mixedColor(.blue, with: .black, by: 0.5)
     case .prewarming: return mixedColor(.blue, with: .black, by: 0.5)
     case .sessionEnded: return mixedColor(.green, with: .black, by: 0.55)
+    case .failed: return mixedColor(.orange, with: .black, by: 0.5)
     }
   }
 
@@ -64,6 +69,7 @@ struct TranscriptionIndicatorView: View {
     case .transcribing: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     case .prewarming: return mixedColor(.blue, with: .white, by: 0.1).opacity(0.6)
     case .sessionEnded: return mixedColor(.green, with: .white, by: 0.1).opacity(0.6)
+    case .failed: return mixedColor(.orange, with: .white, by: 0.1).opacity(0.6)
     }
   }
 
@@ -84,6 +90,7 @@ struct TranscriptionIndicatorView: View {
     case .transcribing: return transcribeBaseColor
     case .prewarming: return transcribeBaseColor
     case .sessionEnded: return .green
+    case .failed: return .orange
     }
   }
 
@@ -104,6 +111,7 @@ struct TranscriptionIndicatorView: View {
   /// progression, so it never claims more than it knows:
   /// not listening yet → listening but nothing heard → words are arriving.
   private var statusLine: String? {
+    if status == .failed { return failureMessage }
     if status == .sessionEnded { return sessionSummary }
     guard status == .recording else { return nil }
     if isWaitingForAudio { return "Not listening yet" }
@@ -121,7 +129,7 @@ struct TranscriptionIndicatorView: View {
   /// Placeholder states are shown dimmed so real transcribed words stand out from status.
   /// The session-ended confirmation is not a placeholder — it is the whole message.
   private var statusLineIsPlaceholder: Bool {
-    liveText.isEmpty && status != .sessionEnded
+    liveText.isEmpty && status != .sessionEnded && status != .failed
   }
 
   /// Width the bubble needs to hug its text, capped so long lines wrap instead of running off
@@ -206,7 +214,8 @@ struct TranscriptionIndicatorView: View {
           )
           .animation(.interactiveSpring(), value: meter)
           .frame(
-            width: status == .recording || status == .sessionEnded ? expandedWidth : baseWidth,
+            width: status == .recording || status == .sessionEnded || status == .failed
+              ? expandedWidth : baseWidth,
             height: baseWidth
           )
           .opacity(status == .hidden ? 0 : 1)

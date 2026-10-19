@@ -33,6 +33,8 @@ struct TranscriptionFeature {
     var isCapturing: Bool = false
     /// Set briefly when a long recording ends, so its end is acknowledged rather than silent.
     var sessionSummary: String?
+    /// Set when the disk refused a write, so recording stopped instead of silently dropping audio.
+    var recordingFailure: String?
     /// When audio actually started flowing, so the "nothing heard" warning is measured from
     /// there rather than from the hotkey press — otherwise engine startup time counts against
     /// the user and the warning fires before they have had a chance to speak.
@@ -49,6 +51,8 @@ struct TranscriptionFeature {
     case task
     case audioLevelUpdated(Meter)
     case sessionSummaryExpired
+    case recordingFailed(String)
+    case recordingFailureExpired
 
     // Hotkey actions
     case hotKeyPressed
@@ -80,6 +84,8 @@ struct TranscriptionFeature {
     case transcription
     case livePreviewSamples
     case sessionSummary
+    case recordingFailure
+    case recordingFailureMonitor
   }
 
   /// Past this length a capture has stopped being dictation and become a session whose loss
@@ -111,13 +117,30 @@ struct TranscriptionFeature {
           startMeteringEffect(),
           startHotKeyMonitoringEffect(),
           warmUpRecorderEffect(),
-          startSampleForwardingEffect()
+          startSampleForwardingEffect(),
+          startRecordingFailureMonitoringEffect()
         )
 
       // MARK: - Metering
 
       case .sessionSummaryExpired:
         state.sessionSummary = nil
+        return .none
+
+      case let .recordingFailed(message):
+        // The disk refused a write, so carrying on would keep dropping audio while the
+        // indicator still claimed to record. Stop now and say why.
+        guard state.isRecording else { return .none }
+        transcriptionFeatureLogger.error("Recording stopped by a write failure: \(message)")
+        state.recordingFailure = "Recording stopped \u{00B7} \(message)"
+        return .merge(
+          .send(.stopRecording),
+          .run { _ in soundEffect.play(.cancel) },
+          recordingFailureExpiryEffect()
+        )
+
+      case .recordingFailureExpired:
+        state.recordingFailure = nil
         return .none
 
       case let .audioLevelUpdated(meter):
@@ -337,6 +360,26 @@ private extension TranscriptionFeature {
     }
   }
 
+  /// Surfaces a write failure the moment it happens. Without this a full disk stops recording
+  /// silently and the user only finds out when they stop talking.
+  func startRecordingFailureMonitoringEffect() -> Effect<Action> {
+    .run { send in
+      for await message in await recording.observeRecordingFailures() {
+        await send(.recordingFailed(message))
+      }
+    }
+    .cancellable(id: CancelID.recordingFailureMonitor, cancelInFlight: true)
+  }
+
+  /// Clears the recording-failure notice after long enough to read.
+  func recordingFailureExpiryEffect() -> Effect<Action> {
+    .run { send in
+      try? await Task.sleep(for: .seconds(12))
+      await send(.recordingFailureExpired)
+    }
+    .cancellable(id: CancelID.recordingFailure, cancelInFlight: true)
+  }
+
   /// Clears the session-ended confirmation after long enough to be noticed.
   func sessionSummaryExpiryEffect() -> Effect<Action> {
     .run { send in
@@ -399,6 +442,7 @@ private extension TranscriptionFeature {
     state.isCapturing = false
     state.listeningSince = nil
     state.sessionSummary = nil
+    state.recordingFailure = nil
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -411,6 +455,7 @@ private extension TranscriptionFeature {
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.sessionSummary),
+      .cancel(id: CancelID.recordingFailure),
       beginLivePreviewEffect(),
       .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
         // Play sound immediately for instant feedback
@@ -862,6 +907,8 @@ struct TranscriptionView: View {
   var status: TranscriptionIndicatorView.Status {
     if store.isRecording {
       return .recording
+    } else if store.recordingFailure != nil {
+      return .failed
     } else if store.sessionSummary != nil {
       // Takes precedence over the transcribing state: the acknowledgement that the session
       // ended and was saved matters more than the progress of the transcription.
@@ -884,6 +931,7 @@ struct TranscriptionView: View {
       liveText: livePreview.text,
       liveTextCarriedOver: livePreview.carriedOverCharacters,
       sessionSummary: store.sessionSummary,
+      failureMessage: store.recordingFailure,
       isCapturing: store.isCapturing
     )
     .task {

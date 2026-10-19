@@ -33,6 +33,8 @@ struct RecordingClient {
   var observeAudioLevel: @Sendable () async -> AsyncStream<Meter> = { AsyncStream { _ in } }
   /// Raw 16kHz mono samples while recording, for the live transcription preview.
   var observeAudioSamples: @Sendable () async -> AsyncStream<[Float]> = { AsyncStream { _ in } }
+  /// Write failures that make it impossible to keep recording, e.g. a full disk.
+  var observeRecordingFailures: @Sendable () async -> AsyncStream<String> = { AsyncStream { _ in } }
   var getAvailableInputDevices: @Sendable () async -> [AudioInputDevice] = { [] }
   var getDefaultInputDeviceName: @Sendable () async -> String? = { nil }
   var warmUpRecorder: @Sendable () async -> Void = {}
@@ -51,6 +53,7 @@ extension RecordingClient: DependencyKey {
       requestMicrophoneAccess: { await live.requestMicrophoneAccess() },
       observeAudioLevel: { await live.observeAudioLevel() },
       observeAudioSamples: { await live.observeAudioSamples() },
+      observeRecordingFailures: { await live.observeRecordingFailures() },
       getAvailableInputDevices: { await live.getAvailableInputDevices() },
       getDefaultInputDeviceName: { await live.getDefaultInputDeviceName() },
       warmUpRecorder: { await live.warmUpRecorder() },
@@ -404,6 +407,12 @@ actor RecordingClientLive {
   private let (audioSamplesStream, audioSamplesContinuation) = AsyncStream<[Float]>.makeStream(
     bufferingPolicy: .bufferingNewest(64)
   )
+  /// Write failures, surfaced to the UI the moment they happen rather than at stop.
+  ///
+  /// Bounded: a failing disk produces one of these per buffer, and the user only needs the
+  /// first.
+  private let (recordingFailureStream, recordingFailureContinuation) = AsyncStream<String>
+    .makeStream(bufferingPolicy: .bufferingNewest(1))
   private var meterTask: Task<Void, Never>?
   private lazy var captureController = SuperFastCaptureController(
     meterContinuation: meterContinuation,
@@ -415,6 +424,9 @@ actor RecordingClientLive {
           captureGeneration: generation
         )
       }
+    },
+    onRecordingFailure: { [recordingFailureContinuation] message in
+      recordingFailureContinuation.yield(message)
     }
   )
   private var captureControllerDeviceID: AudioDeviceID?
@@ -1692,6 +1704,10 @@ actor RecordingClientLive {
 
   func observeAudioSamples() -> AsyncStream<[Float]> {
     audioSamplesStream
+  }
+
+  func observeRecordingFailures() -> AsyncStream<String> {
+    recordingFailureStream
   }
 
   func warmUpRecorder() async {
