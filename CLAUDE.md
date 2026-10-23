@@ -58,7 +58,7 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 
 3. **Sound Effects**: Audio feedback is provided via `SoundEffect.swift` using files in `Resources/Audio/`
 
-4. **Window Management**: Uses an `InvisibleWindow` for the transcription indicator overlay
+4. **Window Management**: Uses `RecordingBarWindow` (`Hex/Views/RecordingBarWindow.swift`) — a fixed-size, non-activating panel the size of the recording bar at the top of the screen, clickable only where the bar is drawn (`RecordingBarLayout`). It can never become key, so clicking Cancel/Finish does not move keyboard focus.
 
 5. **Permissions**: Requires audio input and automation entitlements (see `Hex.entitlements`)
 

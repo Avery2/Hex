@@ -6,6 +6,8 @@ Hex uses a **threshold-based recording system** that behaves differently dependi
 
 The key insight: **Modifier-only hotkeys need protection from accidental triggers** (like quick Option taps for special characters), while regular hotkeys are inherently intentional.
 
+**A recording in progress is never ended by an accident.** It ends on the hotkey, or on the **Cancel** / **Finish** buttons in the recording bar at the top of the screen. ESC does nothing, so you can type freely while a long take is running.
+
 ---
 
 ## Quick Reference
@@ -26,12 +28,12 @@ The key insight: **Modifier-only hotkeys need protection from accidental trigger
 - Click → NOP (ignore, keep recording)
 - Press A → NOP (ignore, keep recording)
 - Add Shift → NOP (ignore, keep recording)
-- ESC → CANCEL (only way to stop)
+- ESC → NOP (ignore, keep recording)
 
 **Key points:**
-- **< 0.3s**: Everything except ESC triggers **silent discard** (no sound)
-- **≥ 0.3s**: Only **ESC cancels** (with sound), everything else is **ignored**
-- Recording continues until you release the modifier or press ESC
+- **< 0.3s**: Everything triggers **silent discard** (no sound)
+- **≥ 0.3s**: Everything is **ignored**; recording ends on release, or on **Finish** / **Cancel** in the bar
+- Recording continues until you release the modifier or click the bar
 
 ---
 
@@ -54,13 +56,13 @@ The key insight: **Modifier-only hotkeys need protection from accidental trigger
 
 **Any time:**
 - Release → STOP (transcribe if long enough)
-- ESC → CANCEL
+- ESC → NOP (ignore, keep recording)
 
 **Key points:**
 - **< minimumKeyTime** (default 0.2s): **Silent discard**
 - **0.2s - 1.0s**: Different key/modifier triggers **stop** (with sound)
 - **> 1.0s**: Everything is **ignored** (allows typing while recording)
-- Release or ESC always stops
+- Release always stops, and so does **Finish** in the bar
 
 ---
 
@@ -175,14 +177,15 @@ Result: Recording continues, Option+Shift passes through
 Why: User might be pressing Shift for capital letters while speaking
 ```
 
-#### Scenario G: ESC cancels anytime
+#### Scenario G: ESC does nothing
 ```
 User: Hold Option (any duration) → Press ESC
       ↓
-  START ───────────→ CANCEL (with sound)
+  START ───────────→ (ignored, keeps recording)
   
-Result: Recording cancelled, cancel sound plays
-Why: ESC is explicit "I want to cancel" gesture
+Result: Recording continues, ESC goes to the app you are in
+Why: Escape is typed constantly in a session you care about, so it must not be able to
+     end one. Stopping is the hotkey, or Finish/Cancel in the bar.
 ```
 
 ---
@@ -269,7 +272,6 @@ Why: Releasing any part of the hotkey = release
 Now recording is locked on:
 - Release doesn't stop it
 - Tap hotkey again to stop
-- ESC also stops
 
 5.0s: Tap hotkey ──────────→ STOP
 ```
@@ -282,13 +284,13 @@ Now recording is locked on:
 4. **Release** (t=0.3s, Δt=0.2s < 0.3s) → **LOCK!** (hands-free mode)
 5. Recording continues until:
    - Tap hotkey again → STOP
-   - Press ESC → STOP
+   - Click **Finish** or **Cancel** in the bar
 
 ### Rules
 
 1. **Timing window**: 2nd tap must be within **0.3s** of 1st release
 2. **Lock engages**: On **2nd release**, not 2nd press
-3. **Exit lock**: Tap hotkey again OR press ESC
+3. **Exit lock**: Tap hotkey again, or click Finish/Cancel in the bar
 4. **Too slow**: If 2nd tap > 0.3s after 1st release, treated as new recording
 
 ---
@@ -306,7 +308,7 @@ Now recording is locked on:
 
 - **`.cancel`** (with cancel sound)
   - Stop recording
-  - Discard audio
+  - Keep the audio, transcribe it, and store it as **not pasted**
   - Play cancel sound
 
 ---
@@ -320,7 +322,8 @@ Now recording is locked on:
 - **Press modifier-only hotkey (Option)** → No (passes through)
 - **Press regular hotkey (Cmd+A)** → Yes (blocked)
 - **`.discard` output** → No (passes through) ← CRITICAL!
-- **`.cancel` output** → Yes (blocked)
+- **`.cancel` output** → Yes (blocked) — no longer produced by the key processor: Escape is
+  never intercepted, and the bar's Cancel is a button rather than a keystroke
 - **Mouse clicks** → Never intercepted (always pass through)
 
 **Example:**
@@ -377,7 +380,7 @@ User: Hold Option (0.1s) → Add Shift → Release Shift → Press Option again
 **Processing order:**
 
 1. **Is ESC pressed?**
-   - YES → CANCEL (exit)
+   - YES → Ignore the event. ESC never ends a recording; the recording bar's buttons do.
 
 2. **Are we dirty?**
    - YES → Ignore input (unless full release)
@@ -429,7 +432,7 @@ User: Hold Option (0.1s) → Add Shift → Release Shift → Press Option again
     - If ≥ 0.3s → (ignore, keep recording)
 
 - **LOCK** (hands-free recording)
-  - Transition: Tap hotkey again OR press ESC → STOP → IDLE
+  - Transition: Tap hotkey again, or click Finish/Cancel in the bar → STOP → IDLE
 
 ---
 
@@ -507,22 +510,22 @@ Result: Audio transcribed ✅
         Typing worked ✅
 ```
 
-**Why:** After 0.3s, Hex assumes you're intentionally recording and ignores other input (except ESC).
+**Why:** After 0.3s, Hex assumes you're intentionally recording and ignores other input.
 
 ---
 
-### Example 5: Accidental recording cancellation
+### Example 5: Ending a take on purpose
 
 ```
-Goal: Cancel accidental recording
+Goal: Finish a long take without touching the hotkey
 
 Timeline:
-  t=0.0s  Press Option          → START recording
-  t=1.0s  "Oh no, accident!"
-  t=1.5s  Press ESC             → CANCEL (with sound)
-  
-Result: Recording cancelled ✅
-        Cancel sound plays
+  t=0.0s   Press Option          → START recording
+  t=0.5s   Type in the terminal  → IGNORED, keeps recording
+  t=12.0s  Press ESC             → IGNORED, keeps recording
+  t=90.0s  Click Finish in the bar → STOP, transcribe, paste
+
+Result: Nothing said before Finish was lost ✅
 ```
 
 ---
@@ -542,7 +545,7 @@ Result: Recording cancelled ✅
   - Click → Ignore (keep recording)
   - Press key → Ignore (keep recording)
   - Add modifier → Ignore (keep recording)
-  - ESC → Cancel
+  - ESC → Ignore (keep recording)
 
 **Regular (Cmd+A):**
 
@@ -559,7 +562,38 @@ Result: Recording cancelled ✅
 
 - **Any time:**
   - Release → Transcribe (if long enough)
-  - ESC → Cancel
+  - ESC → Ignore (keep recording)
+
+---
+
+## The Recording Bar
+
+The indicator at the top of the screen is the only part of Hex that takes clicks, and only while it is
+showing. It is one row: a dot, the elapsed time, the live transcript, and the buttons.
+
+- **While recording**: **Cancel** and **Finish**. Finish pastes, exactly like stopping with the
+  hotkey. Cancel keeps the audio and the transcript but leaves them out of the frontmost app — the
+  decision ESC used to make.
+
+The window is exactly the size of the bar, at the level of the menu bar, and can never become key —
+so clicking Finish does not move keyboard focus out of what you are dictating into. Everywhere else
+on the screen, clicks pass through to the app underneath.
+
+### The two endings
+
+**How a take was started decides how it ends**, not how long it ran:
+
+- **Held hotkey** — a quick dictation. It pastes and the bar gets out of the way. No terminal state,
+  however long you held it: that gesture is about speed, not about keeping an artifact.
+- **Double-tap lock** — a session you deliberately stayed in. When it ends the bar stays: `✓ Session
+  ended · M:SS`, a spinner and "Transcribing" until the words exist, then a primary **Paste**, a
+  chevron that opens the whole transcript, and **×** to dismiss it before it expires on its own.
+
+Paste sends *this take's* words to whatever app is in front now — it is held in the feature state
+rather than read back out of history, so it works with history turned off, and it is what makes
+Cancel safe: the words are kept and one click away. The transcript opens out under the bar on
+demand; the window grows with it, because the window is exactly what is drawn and therefore the only
+region that takes clicks.
 
 ---
 
@@ -568,6 +602,8 @@ Result: Recording cancelled ✅
 - **Core Logic**: `HexCore/Sources/HexCore/Logic/HotKeyProcessor.swift`
 - **Recording Decision**: `HexCore/Sources/HexCore/Logic/RecordingDecision.swift`
 - **Feature Integration**: `Hex/Features/Transcription/TranscriptionFeature.swift`
+- **Bar Geometry**: `HexCore/Sources/HexCore/Logic/RecordingBarLayout.swift`
+- **Bar Window**: `Hex/Views/RecordingBarWindow.swift`
 - **Tests**: `HexCore/Tests/HexCoreTests/HotKeyProcessorTests.swift`
 
 ---

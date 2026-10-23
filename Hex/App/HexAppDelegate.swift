@@ -6,7 +6,7 @@ private let appLogger = HexLog.app
 private let cacheLogger = HexLog.caches
 
 class HexAppDelegate: NSObject, NSApplicationDelegate {
-	var invisibleWindow: InvisibleWindow?
+	var recordingBarWindow: RecordingBarWindow?
 	var settingsWindow: NSWindow?
 	var statusItem: NSStatusItem!
 	private var launchedAtLogin = false
@@ -66,7 +66,7 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		recoverStrandedRecordings(strandedRecordings)
 
 		// Then present main views
-		presentMainView()
+		presentRecordingBar()
 
 		guard shouldOpenForegroundUIOnLaunch else {
 			appLogger.notice("Suppressing foreground windows for login launch")
@@ -131,15 +131,24 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		HexApp.appStore.send(.recoverStrandedRecordings(recordings))
 	}
 
-	func presentMainView() {
-		guard invisibleWindow == nil else {
+	/// Mounts the recording bar. It is the whole of what Hex draws over other apps, and it is a
+	/// window of its own so that its Cancel/Finish buttons can be clicked without Hex activating.
+	func presentRecordingBar() {
+		guard recordingBarWindow == nil else {
 			return
 		}
 		let transcriptionStore = HexApp.appStore.scope(state: \.transcription, action: \.transcription)
-		let transcriptionView = TranscriptionView(store: transcriptionStore).padding().padding(.top).padding(.top)
-			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-		invisibleWindow = InvisibleWindow.fromView(transcriptionView)
-		invisibleWindow?.orderFrontRegardless()
+		let transcriptionView = TranscriptionView(
+			store: transcriptionStore,
+			onInteractiveChanged: { [weak self] isInteractive in
+				self?.recordingBarWindow?.setInteractive(isInteractive)
+			},
+			onBarSizeChanged: { [weak self] size in
+				self?.recordingBarWindow?.setBarSize(size)
+			}
+		)
+		recordingBarWindow = RecordingBarWindow.hosting(transcriptionView)
+		recordingBarWindow?.orderFrontRegardless()
 	}
 
 	func presentSettingsView() {

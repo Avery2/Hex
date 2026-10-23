@@ -36,7 +36,7 @@ final class RecordingRaceTests: XCTestCase {
       $0.soundEffects.play = { _ in }
     }
 
-    await store.send(.startRecording) {
+    await store.send(.startRecording(locked: false)) {
       $0.isRecording = true
       $0.recordingStartTime = now
       $0.sourceAppBundleID = activeApp?.bundleIdentifier
@@ -49,7 +49,7 @@ final class RecordingRaceTests: XCTestCase {
 
     await probe.waitForPendingStop()
 
-    await store.send(.startRecording) {
+    await store.send(.startRecording(locked: false)) {
       $0.isRecording = true
       $0.recordingStartTime = now
       $0.sourceAppBundleID = activeApp?.bundleIdentifier
@@ -159,7 +159,7 @@ final class RecordingRaceTests: XCTestCase {
       $0.soundEffects.play = { _ in }
     }
 
-    await store.send(.startRecording) {
+    await store.send(.startRecording(locked: false)) {
       $0.isRecording = true
       $0.recordingStartTime = now
       $0.sourceAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -199,7 +199,7 @@ final class RecordingRaceTests: XCTestCase {
       $0.soundEffects.play = { _ in }
     }
 
-    await store.send(.startRecording) {
+    await store.send(.startRecording(locked: false)) {
       $0.isRecording = true
       $0.recordingStartTime = now
       $0.sourceAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -232,7 +232,7 @@ final class RecordingRaceTests: XCTestCase {
       TranscriptionFeature()
     }
 
-    await store.send(.transcriptionResult("", audioURL, 1.25))
+    await store.send(.transcriptionResult("", audioURL, 1.25, .pasted))
     await store.finish()
 
     XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
@@ -254,7 +254,7 @@ final class RecordingRaceTests: XCTestCase {
     let store = TestStore(initialState: Self.makeState()) {
       TranscriptionFeature()
     } withDependencies: {
-      $0.transcriptPersistence.save = { text, audioURL, duration, sourceAppBundleID, sourceAppName in
+      $0.transcriptPersistence.save = { text, audioURL, duration, sourceAppBundleID, sourceAppName, status in
         await probe.record(duration: duration)
         return transcript
       }
@@ -262,7 +262,7 @@ final class RecordingRaceTests: XCTestCase {
       $0.soundEffects.play = { _ in }
     }
 
-    await store.send(.transcriptionResult("hello", audioURL, duration))
+    await store.send(.transcriptionResult("hello", audioURL, duration, .pasted))
     while await probe.duration == nil {
       await Task.yield()
     }

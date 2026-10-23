@@ -442,23 +442,24 @@ struct HotKeyProcessorTests {
     
     // MARK: - Additional Coverage Tests
     
-    // Tests ESC cancellation from hold state
+    // ESC must not be able to end a recording: only the hotkey or the bar's own buttons do.
     @Test
-    func escape_cancelsFromHold() throws {
+    func escape_doesNotEndARecordingHeld() throws {
         runScenario(
             hotkey: HotKey(key: .a, modifiers: [.command]),
             steps: [
                 // Start recording
                 ScenarioStep(time: 0.0, key: .a, modifiers: [.command], expectedOutput: .startRecording, expectedIsMatched: true),
-                // Press ESC
-                ScenarioStep(time: 0.5, key: .escape, modifiers: [], expectedOutput: .cancel, expectedIsMatched: false),
+                // Press ESC: nothing happens to the recording, and the chord is still matched
+                ScenarioStep(time: 0.5, key: .escape, modifiers: [], expectedOutput: nil, expectedIsMatched: true),
+                // The key is still held, so it still stops on release
+                ScenarioStep(time: 0.8, key: nil, modifiers: [], expectedOutput: .stopRecording, expectedIsMatched: false),
             ]
         )
     }
-    
-    // Tests ESC cancellation from lock state
+
     @Test
-    func escape_cancelsFromLock() throws {
+    func escape_doesNotEndARecordingLocked() throws {
         runScenario(
             hotkey: HotKey(key: nil, modifiers: [.option]),
             steps: [
@@ -469,26 +470,31 @@ struct HotKeyProcessorTests {
                 // Second tap (locks)
                 ScenarioStep(time: 0.2, key: nil, modifiers: [.option], expectedOutput: .startRecording, expectedIsMatched: true),
                 ScenarioStep(time: 0.3, key: nil, modifiers: [], expectedOutput: nil, expectedIsMatched: true),
-                // Now locked - press ESC
-                ScenarioStep(time: 1.0, key: .escape, modifiers: [], expectedOutput: .cancel, expectedIsMatched: false),
+                // Now locked - press ESC twice, which still leaves the recording running
+                ScenarioStep(time: 1.0, key: .escape, modifiers: [], expectedOutput: nil, expectedIsMatched: true),
+                ScenarioStep(time: 1.2, key: .escape, modifiers: [], expectedOutput: nil, expectedIsMatched: true),
+                // The hotkey is what stops it
+                ScenarioStep(time: 1.5, key: nil, modifiers: [.option], expectedOutput: .stopRecording, expectedIsMatched: false),
+                ScenarioStep(time: 1.6, key: nil, modifiers: [], expectedOutput: nil, expectedIsMatched: false),
             ]
         )
     }
-    
-    // Tests that ESC while holding hotkey doesn't restart recording (issue #36)
+
+    // Tests that ESC while holding hotkey doesn't restart recording (issue #36), and no longer
+    // ends it either
     @Test
-    func escape_whileHoldingHotkey_doesNotRestart() throws {
+    func escape_whileHoldingHotkey_isIgnored() throws {
         runScenario(
             hotkey: HotKey(key: .a, modifiers: [.command]),
             steps: [
                 // Start recording
                 ScenarioStep(time: 0.0, key: .a, modifiers: [.command], expectedOutput: .startRecording, expectedIsMatched: true),
-                // Press ESC while still holding hotkey
-                ScenarioStep(time: 0.5, key: .escape, modifiers: [.command], expectedOutput: .cancel, expectedIsMatched: false),
-                // Hotkey still held - should be ignored (dirty)
-                ScenarioStep(time: 0.6, key: .a, modifiers: [.command], expectedOutput: nil, expectedIsMatched: false),
-                // Full release
-                ScenarioStep(time: 0.7, key: nil, modifiers: [], expectedOutput: nil, expectedIsMatched: false),
+                // Press ESC while still holding hotkey: ignored, and not a restart
+                ScenarioStep(time: 0.5, key: .escape, modifiers: [.command], expectedOutput: nil, expectedIsMatched: true),
+                // Hotkey still held - still ignored
+                ScenarioStep(time: 0.6, key: .a, modifiers: [.command], expectedOutput: nil, expectedIsMatched: true),
+                // Releasing the chord is what ends the recording
+                ScenarioStep(time: 0.7, key: nil, modifiers: [], expectedOutput: .stopRecording, expectedIsMatched: false),
                 // Now pressing hotkey should work again
                 ScenarioStep(time: 0.8, key: .a, modifiers: [.command], expectedOutput: .startRecording, expectedIsMatched: true),
             ]

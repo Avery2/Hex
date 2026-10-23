@@ -5,6 +5,7 @@
 //  Created by Kit Langton on 1/24/25.
 //
 
+import AppKit
 import ComposableArchitecture
 import CoreGraphics
 import Foundation
@@ -41,6 +42,20 @@ struct TranscriptionFeature {
     var listeningSince: Date?
     var sourceAppBundleID: String?
     var sourceAppName: String?
+    /// What this take transcribed to, once it is known. The bar can offer to paste it again in
+    /// whatever app you ended up in — and it is kept here rather than read back out of history,
+    /// because it has to work when history is turned off.
+    var lastTranscript: String?
+    /// Set when the finished bar is dismissed with ×, so a transcription still in flight does not
+    /// bring the bar straight back after you said you were done with it.
+    var resultDismissed: Bool = false
+    /// Whether this take is running in the hands-free mode (double-tap lock) rather than under a
+    /// held hotkey.
+    ///
+    /// This is what decides how the take ends, and it is the whole difference between Hex's two
+    /// interactions: a held hotkey is a quick dictation that pastes and gets out of the way, while a
+    /// locked take is a session whose result stays on screen to be pasted again or read in full.
+    var isLockedTake: Bool = false
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -55,16 +70,31 @@ struct TranscriptionFeature {
     case recordingFailureExpired
 
     // Hotkey actions
-    case hotKeyPressed
+    /// A press of the hotkey. `locked` is whether the press also engaged hands-free mode — which
+    /// happens when the hotkey is set to double-tap-only — because that decides how the take ends.
+    case hotKeyPressed(locked: Bool)
     case hotKeyReleased
+    /// The hotkey machine just engaged hands-free mode on the take that is already running.
+    case takeBecameLocked
 
     // Recording flow
-    case startRecording
+    case startRecording(locked: Bool)
     case stopRecording
 
     // Cancel/discard flow
     case cancel   // Explicit cancellation with sound
     case discard  // Silent discard (too short/accidental)
+
+    /// Cancel clicked in the recording bar. Same as `.cancel`, but the hotkey was never released,
+    /// so the press-and-hold machine has to be told the take is over.
+    case cancelFromBar
+    /// Finish clicked in the recording bar. Same as `.stopRecording`, plus the same telling.
+    case finishFromBar
+
+    /// Take the finished bar off screen now instead of waiting for it to expire.
+    case dismissResult
+    /// Paste what this take transcribed into whatever app is in front now.
+    case pasteResult
 
     // Transcription result flow
     case transcribe(URL, TimeInterval, TranscriptStatus)
@@ -127,6 +157,28 @@ struct TranscriptionFeature {
         state.sessionSummary = nil
         return .none
 
+      case .dismissResult:
+        state.sessionSummary = nil
+        state.recordingFailure = nil
+        state.resultDismissed = true
+        return .merge(
+          .cancel(id: CancelID.sessionSummary),
+          .cancel(id: CancelID.recordingFailure)
+        )
+
+      case .pasteResult:
+        guard let text = state.lastTranscript, !text.isEmpty else { return .none }
+        // Pasting is the end of this take as far as the bar is concerned.
+        state.sessionSummary = nil
+        state.resultDismissed = true
+        return .merge(
+          .cancel(id: CancelID.sessionSummary),
+          .run { _ in
+            await pasteboard.paste(text)
+            soundEffect.play(.pasteTranscript)
+          }
+        )
+
       case let .recordingFailed(message):
         // The disk refused a write, so carrying on would keep dropping audio while the
         // indicator still claimed to record. Stop now and say why.
@@ -134,6 +186,7 @@ struct TranscriptionFeature {
         transcriptionFeatureLogger.error("Recording stopped by a write failure: \(message)")
         state.recordingFailure = "Recording stopped \u{00B7} \(message)"
         return .merge(
+          hotKeyResetEffect(),
           .send(.stopRecording),
           .run { _ in soundEffect.play(.cancel) },
           recordingFailureExpiryEffect()
@@ -160,20 +213,31 @@ struct TranscriptionFeature {
 
       // MARK: - HotKey Flow
 
-      case .hotKeyPressed:
+      case let .hotKeyPressed(locked):
         // If we're transcribing, send a cancel first. Otherwise start recording immediately.
         // We'll decide later (on release) whether to keep or discard the recording.
-        return handleHotKeyPressed(isTranscribing: state.isTranscribing)
+        return handleHotKeyPressed(isTranscribing: state.isTranscribing, locked: locked)
 
       case .hotKeyReleased:
         // If we're currently recording, then stop. Otherwise, just cancel
         // the delayed "startRecording" effect if we never actually started.
         return handleHotKeyReleased(isRecording: state.isRecording)
 
+      case .takeBecameLocked:
+        // The lock is not an output of its own in the hotkey machine — the press that engages it
+        // means "keep recording" — but the feature has to know, because a locked take is the one
+        // that leaves its bar up when it ends. See `isLockedTake`.
+        //
+        // Only while a take is actually running: a lock with nothing recording cannot describe it,
+        // and carrying it forward would mislabel the next, held take as a session.
+        guard state.isRecording else { return .none }
+        state.isLockedTake = true
+        return .none
+
       // MARK: - Recording Flow
 
-      case .startRecording:
-        return handleStartRecording(&state)
+      case let .startRecording(locked):
+        return handleStartRecording(&state, locked: locked)
 
       case .stopRecording:
         return handleStopRecording(&state)
@@ -219,6 +283,16 @@ struct TranscriptionFeature {
         }
         return handleCancel(&state)
 
+      case .cancelFromBar:
+        guard state.isRecording || state.isTranscribing else { return .none }
+        return .merge(hotKeyResetEffect(), .send(.cancel))
+
+      case .finishFromBar:
+        // The buttons only exist while recording; a queued second click must not reset the hotkey
+        // machine underneath a take that has already started again.
+        guard state.isRecording else { return .none }
+        return .merge(hotKeyResetEffect(), .send(.stopRecording))
+
       case .discard:
         // Silent discard for quick/accidental recordings
         guard state.isRecording else {
@@ -249,6 +323,7 @@ private extension TranscriptionFeature {
       var hotKeyProcessor: HotKeyProcessor = .init(hotkey: HotKey(key: nil, modifiers: [.option]))
       @Shared(.isSettingHotKey) var isSettingHotKey: Bool
       @Shared(.hexSettings) var hexSettings: HexSettings
+      let resetStamp = Shared(.hotKeyResetStamp)
 
       // Handle incoming input events (keyboard and mouse)
       let token = keyEventMonitor.handleInputEvent { inputEvent in
@@ -256,6 +331,10 @@ private extension TranscriptionFeature {
         if isSettingHotKey {
           return false
         }
+
+        // A take can end without the chord ever being released — the bar's Cancel/Finish, a write
+        // failure, a missing model — and this machine is the only thing that thinks otherwise.
+        hotKeyProcessor.syncExternalReset(resetStamp.wrappedValue)
 
         // Always keep hotKeyProcessor in sync with current user hotkey preference
         hotKeyProcessor.hotkey = hexSettings.hotkey
@@ -266,18 +345,16 @@ private extension TranscriptionFeature {
 
         switch inputEvent {
         case .keyboard(let keyEvent):
-          // If Escape is pressed with no modifiers while idle, let's treat that as `cancel`.
-          if keyEvent.key == .escape, keyEvent.modifiers.isEmpty,
-             hotKeyProcessor.state == .idle
-          {
-            Task { await send(.cancel) }
-            return false
-          }
+          let wasLocked = hotKeyProcessor.state == .doubleTapLock
+          let output = hotKeyProcessor.process(keyEvent: keyEvent)
+          let isLocked = hotKeyProcessor.state == .doubleTapLock
 
-		  // Process the key event
-		  switch hotKeyProcessor.process(keyEvent: keyEvent) {
-		  case .startRecording:
-			Task { await send(.hotKeyPressed) }
+          switch output {
+          case .startRecording:
+            // Hands-free mode can be engaged by the very press that starts the take (a
+            // double-tap-only hotkey), so the mode travels with the press rather than in a
+            // separate action that could arrive first and describe nothing.
+            Task { await send(.hotKeyPressed(locked: isLocked)) }
             // If the hotkey is purely modifiers, return false to keep it from interfering with normal usage
             // But if useDoubleTapOnly is true, always intercept the key
             return useDoubleTapOnly || keyEvent.key != nil
@@ -287,6 +364,8 @@ private extension TranscriptionFeature {
             return false // or `true` if you want to intercept
 
           case .cancel:
+            // Nothing produces this any more: Escape is ignored (see HotKeyProcessor) and the bar's
+            // Cancel is a button. Kept so the machine can still ask for it if a key ever should.
             Task { await send(.cancel) }
             return true
 
@@ -295,6 +374,12 @@ private extension TranscriptionFeature {
             return false // Don't intercept - let the key chord reach other apps
 
           case .none:
+            // Engaging hands-free mode on a take that is already running has no output of its own —
+            // that press means "keep recording" — so the transition is sent on its own.
+            if !wasLocked, isLocked {
+              Task { await send(.takeBecameLocked) }
+            }
+
             // If we detect repeated same chord, maybe intercept.
             if let pressedKey = keyEvent.key,
                pressedKey == hotKeyProcessor.hotkey.key,
@@ -306,6 +391,13 @@ private extension TranscriptionFeature {
           }
 
         case .mouseClick:
+          // A click on the bar is the user reaching for Cancel or Finish, not the stray Option+click
+          // in another app that this path exists to catch, so it must never read as a discard.
+          // (The event tap runs on the main run loop, so the screens are safe to read here.)
+          if RecordingBarWindow.contains(NSEvent.mouseLocation) {
+            return false
+          }
+
           // Process mouse click - for modifier-only hotkeys, this may cancel/discard
           switch hotKeyProcessor.processMouseClick() {
           case .cancel:
@@ -410,12 +502,12 @@ private extension TranscriptionFeature {
 // MARK: - HotKey Press/Release Handlers
 
 private extension TranscriptionFeature {
-  func handleHotKeyPressed(isTranscribing: Bool) -> Effect<Action> {
+  func handleHotKeyPressed(isTranscribing: Bool, locked: Bool) -> Effect<Action> {
     // If already transcribing, cancel first. Otherwise start recording immediately.
-    guard isTranscribing else { return .send(.startRecording) }
+    guard isTranscribing else { return .send(.startRecording(locked: locked)) }
     return .concatenate(
       .send(.cancel),
-      .send(.startRecording)
+      .send(.startRecording(locked: locked))
     )
   }
 
@@ -428,13 +520,14 @@ private extension TranscriptionFeature {
 // MARK: - Recording Handlers
 
 private extension TranscriptionFeature {
-  func handleStartRecording(_ state: inout State) -> Effect<Action> {
+  func handleStartRecording(_ state: inout State, locked: Bool) -> Effect<Action> {
     guard state.modelBootstrapState.isModelReady else {
       return .merge(
         .send(.modelMissing),
         .run { _ in soundEffect.play(.cancel) }
       )
     }
+    state.isLockedTake = locked
     state.isRecording = true
     let startTime = now
     state.recordingStartTime = startTime
@@ -443,6 +536,8 @@ private extension TranscriptionFeature {
     state.listeningSince = nil
     state.sessionSummary = nil
     state.recordingFailure = nil
+    state.lastTranscript = nil
+    state.resultDismissed = false
     
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -476,7 +571,29 @@ private extension TranscriptionFeature {
     )
   }
 
+  /// Tells the hotkey monitor that a recording has ended without the hotkey hearing the end of it,
+  /// so its press-and-hold machine goes back to idle instead of waiting for a release that will
+  /// never come. See the monitor effect.
+  ///
+  /// Only for ends the chord never causes — the bar's buttons, a write failure. It must NOT be run
+  /// when the hotkey itself ended the take: a double-tap lock is built out of the release times of
+  /// the two taps, so resetting in between erases the tap that the second one is measured against
+  /// and the gesture stops locking.
+  func hotKeyResetEffect() -> Effect<Action> {
+    .run { _ in
+      @Shared(.hotKeyResetStamp) var stamp: Int
+      $stamp.withLock { $0 += 1 }
+    }
+  }
+
   func handleStopRecording(_ state: inout State) -> Effect<Action> {
+    // Finish can be clicked twice, and a click can race the hotkey's own release. Stopping a stop
+    // that already happened would run a second stop against no active recording and report
+    // "no captured audio" over a take that is transcribing perfectly well.
+    guard state.isRecording else { return .none }
+
+    let isLocked = state.isLockedTake
+    state.isLockedTake = false
     state.isRecording = false
     
     let stopTime = now
@@ -513,8 +630,11 @@ private extension TranscriptionFeature {
     state.error = nil
     state.isPrewarming = true
 
-    // A session's end is worth announcing; a two-word dictation's is not.
-    let isSession = duration >= Self.sessionDurationThreshold
+    // How a take was started decides how it ends. A locked take is one you deliberately stayed in,
+    // so its result stays on screen: read the whole thing, paste it again, or close it. A held
+    // hotkey is a quick dictation — it pastes and the bar gets out of the way, however long you
+    // held it, because that gesture is about speed rather than keeping an artifact.
+    let isSession = isLocked
     if isSession {
       state.sessionSummary = Self.sessionSummaryText(duration: duration)
     }
@@ -688,6 +808,11 @@ private extension TranscriptionFeature {
     let sourceAppBundleID = state.sourceAppBundleID
     let sourceAppName = state.sourceAppName
     let transcriptionHistory = state.$transcriptionHistory
+    // Held for the bar's Paste button: this take's own words — not a previous take's, and not a
+    // recovered file — so "Paste" can never send the wrong text.
+    if !state.isRecording, status != .recovered {
+      state.lastTranscript = modifiedResult
+    }
 
     return .run { send in
       do {
@@ -847,14 +972,17 @@ private extension TranscriptionFeature {
   /// away via "Paste Last Transcript".
   func handleCancel(_ state: inout State) -> Effect<Action> {
     let wasRecording = state.isRecording
+    let isLocked = state.isLockedTake
+    state.isLockedTake = false
     let duration = state.recordingStartTime.map { now.timeIntervalSince($0) } ?? 0
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
 
-    // ESC keeps the recording either way. For a session it should also say so, rather than
-    // playing the short cancel blip and looking like the take was thrown away.
-    let isSession = duration >= Self.sessionDurationThreshold
+    // Cancelling keeps the audio either way. A cancelled locked take should also say so, rather
+    // than playing the short cancel blip and looking like the take was thrown away — and it keeps
+    // its Paste, because "do not paste this yet" is exactly when you want to paste it elsewhere.
+    let isSession = isLocked
     if isSession {
       state.sessionSummary = Self.sessionSummaryText(duration: duration)
     }
@@ -884,6 +1012,7 @@ private extension TranscriptionFeature {
   }
 
   func handleDiscard(_ state: inout State) -> Effect<Action> {
+    state.isLockedTake = false
     state.isRecording = false
     state.isPrewarming = false
 
@@ -911,10 +1040,17 @@ struct TranscriptionView: View {
   @Bindable var store: StoreOf<TranscriptionFeature>
   @ObserveInjection var inject
   @Shared(.livePreview) var livePreview: LivePreviewSnapshot
+  /// Told whether the bar is on screen, so its window knows when taking clicks is worth it.
+  var onInteractiveChanged: (Bool) -> Void = { _ in }
+  /// Told how tall the bar is, so its window — which is exactly the bar — can follow it.
+  var onBarSizeChanged: (CGSize) -> Void = { _ in }
 
   var status: TranscriptionIndicatorView.Status {
     if store.isRecording {
       return .recording
+    } else if store.resultDismissed {
+      // The bar was dismissed while its transcription was still running; it must not come back.
+      return .hidden
     } else if store.recordingFailure != nil {
       return .failed
     } else if store.sessionSummary != nil {
@@ -936,11 +1072,25 @@ struct TranscriptionView: View {
       meter: store.meter,
       speech: store.speech,
       recordingStartedAt: store.listeningSince,
+      startedAt: store.recordingStartTime,
       liveText: livePreview.text,
       liveTextCarriedOver: livePreview.carriedOverCharacters,
       sessionSummary: store.sessionSummary,
       failureMessage: store.recordingFailure,
-      isCapturing: store.isCapturing
+      isCapturing: store.isCapturing,
+      isTranscribing: store.isTranscribing,
+      canPaste: store.lastTranscript?.isEmpty == false,
+      transcript: store.lastTranscript,
+      // Finish pastes, exactly as stopping with the hotkey does. Cancel keeps the audio and the
+      // transcript but leaves it out of the frontmost app, which is the decision Escape used to
+      // make — and can no longer make by accident. Both go through the `FromBar` actions: a click
+      // ends the take without the hotkey ever being released, and the hotkey monitor has to know.
+      onCancel: { store.send(.cancelFromBar) },
+      onFinish: { store.send(.finishFromBar) },
+      onPaste: { store.send(.pasteResult) },
+      onDismiss: { store.send(.dismissResult) },
+      onInteractiveChanged: onInteractiveChanged,
+      onBarSizeChanged: onBarSizeChanged
     )
     .task {
       await store.send(.task).finish()

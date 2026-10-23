@@ -28,7 +28,7 @@ private let hotKeyLogger = HexLog.hotKey
 /// A "tap" is a quick press-and-release sequence. The processor tracks release times:
 /// - First tap: Press hotkey → release → record release time
 /// - Second tap: If pressed within `doubleTapThreshold` (0.3s), enters `.doubleTapLock`
-/// - The lock persists until the user presses the hotkey again or presses ESC
+/// - The lock persists until the user presses the hotkey again
 ///
 /// # Press-and-Hold Behavior
 ///
@@ -45,7 +45,7 @@ private let hotKeyLogger = HexLog.hotKey
 /// - "Release" = any required modifier released
 /// - Uses higher minimum duration (0.3s) to prevent conflicts with OS shortcuts
 /// - Mouse clicks within threshold → silent discard (prevents Option+click conflicts)
-/// - After threshold, only ESC cancels (mouse clicks ignored)
+/// - After threshold, input is ignored: nothing but the hotkey or the bar's buttons ends it
 ///
 /// # Dirty State & Backsliding Prevention
 ///
@@ -56,10 +56,13 @@ private let hotKeyLogger = HexLog.hotKey
 ///
 /// # ESC Key Handling
 ///
-/// Pressing ESC always cancels active recordings:
-/// - Returns `.cancel` output (plays cancel sound)
-/// - Enters dirty state to prevent immediate re-triggering
-/// - Works in both `.pressAndHold` and `.doubleTapLock` states
+/// Nothing. ESC is not a way out of a recording — see `process(keyEvent:)`. It used to cancel,
+/// which meant an Escape aimed at the app being dictated into ended the take, and a long session
+/// is exactly when Escape gets pressed. The recording ends on the hotkey or on the recording bar's
+/// own buttons.
+///
+/// The processor leaves the event alone rather than swallowing it, so ESC still reaches whatever
+/// app has focus.
 ///
 /// # Example Interaction Flow
 ///
@@ -118,6 +121,9 @@ public struct HotKeyProcessor {
     /// Prevents accidental re-triggering after cancellation or during complex key combos
     private var isDirty: Bool = false
 
+    /// The last externally-signalled reset this processor has acted on. See `syncExternalReset`.
+    private var lastResetStamp: Int = 0
+
     // MARK: - Timing Thresholds
     
     /// Maximum time between two taps to be considered a double-tap (0.3 seconds)
@@ -166,20 +172,22 @@ public struct HotKeyProcessor {
     /// - Returns: An output action (.startRecording, .stopRecording, .cancel, .discard) or nil if no action needed
     ///
     /// # Event Processing Order
-    /// 1. ESC key → immediate cancellation
+    /// 1. ESC is deliberately not a way out of a recording
     /// 2. Dirty state check → ignore input until full release
     /// 3. Matching chord → handle as hotkey press
     /// 4. Non-matching chord → handle as release or different key
     public mutating func process(keyEvent: KeyEvent) -> Output? {
-        // 1) ESC => immediate cancel
+        // 1) ESC does nothing to a recording in progress.
+        //
+        // It used to cancel, which made every Escape aimed at whatever you were dictating into a
+        // way to end the take by accident — and a long session is exactly when you type Escape the
+        // most. Stopping is the hotkey or the bar's own buttons, neither of which you can hit by
+        // typing. The key is left alone here rather than swallowed, so Escape still does what the
+        // app you are working in expects it to do.
         if keyEvent.key == .escape {
             let currentState = state
-            hotKeyLogger.notice("ESC pressed while state=\(String(describing: currentState))")
-        }
-        if keyEvent.key == .escape, state != .idle {
-            isDirty = true
-            resetToIdle()
-            return .cancel
+            hotKeyLogger.notice("ESC pressed while state=\(String(describing: currentState)); not touching the recording")
+            return nil
         }
 
         // 2) If dirty, ignore until full release (nil, [])
@@ -217,7 +225,7 @@ public struct HotKeyProcessor {
     /// # Behavior
     /// - Modifier-only hotkeys: Discard if within threshold, ignore after threshold
     /// - Key+modifier hotkeys: Always ignore (no conflict with mouse clicks)
-    /// - Double-tap lock: Always ignore (intentional recording, only ESC cancels)
+    /// - Double-tap lock: Always ignore (intentional recording, nothing but the hotkey stops it)
     public mutating func processMouseClick() -> Output? {
         // Only cancel if:
         // 1. The hotkey is modifier-only (no key component)
@@ -236,7 +244,7 @@ public struct HotKeyProcessor {
             // (max of minimumKeyTime and 0.3s) to be consistent
             let effectiveMinimum = max(minimumKeyTime, RecordingDecisionEngine.modifierOnlyMinimumDuration)
             
-            // Only discard if within threshold - after threshold, ignore clicks (only ESC cancels)
+            // Only discard if within threshold - after threshold, ignore clicks
             if elapsed < effectiveMinimum {
                 isDirty = true
                 resetToIdle()
@@ -246,7 +254,7 @@ public struct HotKeyProcessor {
                 return nil
             }
         case .doubleTapLock:
-            // Mouse click during double-tap lock => ignore (only ESC cancels locked recordings)
+            // Mouse click during double-tap lock => ignore (only the hotkey stops a locked recording)
             return nil
         }
     }
@@ -344,7 +352,7 @@ extension HotKeyProcessor {
     ///
     /// **Modifier-only hotkeys:**
     /// - Within threshold (0.3s): Discard silently (accidental trigger, e.g., Option+click)
-    /// - After threshold: Ignore completely, keep recording (only ESC cancels)
+    /// - After threshold: Ignore completely, keep recording (nothing but the hotkey or the bar stops it)
     ///
     /// **Key+modifier hotkeys:**
     /// - Within 1s: Stop recording (likely accidental)
@@ -404,7 +412,7 @@ extension HotKeyProcessor {
                         resetToIdle()
                         return .discard
                     } else {
-                        // After threshold => ignore extra modifiers/keys, keep recording (only ESC cancels)
+                        // After threshold => ignore extra modifiers/keys, keep recording
                         return nil
                     }
                 } else {
@@ -530,8 +538,23 @@ extension HotKeyProcessor {
     /// Clears:
     /// - `state` → `.idle`
     /// - `lastTapAt` → nil (double-tap timing reset)
-    private mutating func resetToIdle() {
+    ///
+    /// Called by whoever ends a recording the hotkey never heard the end of — see
+    /// `hotKeyResetEffect()` in `TranscriptionFeature`.
+    public mutating func resetToIdle() {
         state = .idle
         lastTapAt = nil
+    }
+
+    /// Gets back in step after a recording ended without the chord being released.
+    ///
+    /// The bar's Cancel/Finish, a write failure or a missing model all end a take while this
+    /// processor still believes the hotkey is held — and then the next press means "stop" to a
+    /// recording that already finished, which reads as one dead press of the hotkey. Whoever ended
+    /// it bumps a stamp rather than reaching in here; this acts on each stamp once.
+    public mutating func syncExternalReset(_ stamp: Int) {
+        guard stamp != lastResetStamp else { return }
+        lastResetStamp = stamp
+        resetToIdle()
     }
 }

@@ -11,7 +11,8 @@
 # changes the cdhash every build, which macOS reads as a different app.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# The script sits at the repository root, so its own directory is the root.
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$root"
 
 identity=${HEX_SIGN_IDENTITY:-"Apple Development: javerychan@outlook.com (7L8S7AGTK6)"}

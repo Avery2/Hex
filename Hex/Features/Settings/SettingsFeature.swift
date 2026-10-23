@@ -33,6 +33,20 @@ extension SharedReaderKey
   }
 }
 
+extension SharedReaderKey
+  where Self == InMemoryKey<Int>.Default
+{
+  /// Bumped whenever a recording ends without the hotkey having been released — the recording
+  /// bar's Cancel/Finish, a write failure, a missing model.
+  ///
+  /// The press-and-hold state machine lives inside the hotkey monitoring effect, which cannot see
+  /// the reducer's state. This is the one line between them: the reducer bumps it, the monitor reads
+  /// it and puts itself back to idle before it reads the next event.
+  static var hotKeyResetStamp: Self {
+    Self[.inMemory("hotKeyResetStamp"), default: 0]
+  }
+}
+
 // MARK: - Settings Feature
 
 @Reducer
