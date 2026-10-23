@@ -6,7 +6,7 @@ A fork of the original Swift Hex with live transcription, clearer recording feed
 
 A quick walkthrough of the improvements, including live transcription, clearer recording states, and recovering interrupted transcripts.
 
-https://github.com/user-attachments/assets/049b4cec-a34e-4a81-81eb-8ea82af5ff3f
+https://github.com/user-attachments/assets/a8248383-ebbd-47f8-8f7d-decefb8ed6dd
 
 *Demo: Live transcription, recording feedback, and transcript recovery.*
 
