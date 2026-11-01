@@ -13,6 +13,7 @@ struct WordRemappingsView: View {
 		ScrollView {
 			VStack(alignment: .leading, spacing: 24) {
 				previewSection
+				cleanupSection
 				wordRulesSection
 				outputFormattingSection
 			}
@@ -57,6 +58,11 @@ struct WordRemappingsView: View {
 							.padding(.horizontal, 8)
 							.padding(.vertical, 5)
 							.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+						if let cleaned = previewCleanupNote {
+							Text(cleaned)
+								.font(.caption2)
+								.foregroundStyle(.secondary)
+						}
 					}
 				}
 				.padding(.vertical, 4)
@@ -160,6 +166,117 @@ struct WordRemappingsView: View {
 		}
 	}
 
+	/// The last step of the same pipeline this screen edits.
+	///
+	/// Grouped and explained, with the literal pattern and one worked sentence per group: a bare
+	/// regex table is exact and unreadable, and a paragraph about "filler words" is readable and
+	/// tells you nothing about what will happen to your words.
+	private var cleanupSection: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			Text("Clean up dictation")
+				.font(.headline)
+
+			GroupBox {
+				VStack(alignment: .leading, spacing: 14) {
+					Picker(
+						"Clean up dictation",
+						selection: Binding(
+							get: { store.hexSettings.cleanupLevel },
+							set: { store.send(.setCleanupLevel($0)) }
+						)
+					) {
+						ForEach(CleanupLevel.allCases, id: \.self) { level in
+							Text(level.label).tag(level)
+						}
+					}
+					.pickerStyle(.segmented)
+					.labelsHidden()
+					.fixedSize()
+
+					if store.hexSettings.cleanupLevel == .off {
+						Text("Nothing is changed — paste is exactly what was transcribed.")
+							.settingsCaption()
+					} else {
+						ForEach(TranscriptCleanup.groups) { group in
+							cleanupGroup(group)
+						}
+						Divider()
+						Text("Every rule deletes words or moves whitespace. Nothing is added, reordered or rewritten, and “um”/“uh” are already handled by the word rules below.")
+							.settingsCaption()
+					}
+				}
+				.frame(maxWidth: .infinity, alignment: .leading)
+				.padding(12)
+			}
+		}
+	}
+
+	private func cleanupGroup(_ group: CleanupGroup) -> some View {
+		let included = isIncluded(group)
+		let worked = TranscriptCleanup.clean(group.sample, level: store.hexSettings.cleanupLevel).text
+		return VStack(alignment: .leading, spacing: 5) {
+			HStack(spacing: 6) {
+				Text(group.title)
+					.font(.caption.weight(.semibold))
+				if group.minimumLevel == .full, !included {
+					Text("Full only")
+						.font(.caption2)
+						.padding(.horizontal, 5)
+						.padding(.vertical, 1)
+						.background(Color.secondary.opacity(0.15), in: Capsule())
+				}
+				Spacer(minLength: 0)
+			}
+
+			Text(group.explanation)
+				.font(.caption)
+				.foregroundStyle(.secondary)
+				.fixedSize(horizontal: false, vertical: true)
+
+			ForEach(group.rules) { rule in
+				HStack(alignment: .firstTextBaseline, spacing: 7) {
+					Text(rule.pattern)
+						.font(.system(size: 10.5, design: .monospaced))
+						.foregroundStyle(.secondary)
+						.lineLimit(1)
+						.truncationMode(.middle)
+					Image(systemName: "arrow.right")
+						.font(.system(size: 8))
+						.foregroundStyle(.tertiary)
+					Text(rule.replacement)
+						.font(.system(size: 10.5, design: .monospaced))
+						.foregroundStyle(.tertiary)
+						.lineLimit(1)
+					Spacer(minLength: 0)
+				}
+			}
+
+			HStack(alignment: .firstTextBaseline, spacing: 7) {
+				Text(group.sample)
+					.font(.system(size: 10.5, design: .monospaced))
+					.foregroundStyle(.tertiary)
+					.lineLimit(2)
+				Image(systemName: "arrow.right")
+					.font(.system(size: 8))
+					.foregroundStyle(.tertiary)
+				Text(worked)
+					.font(.system(size: 10.5, design: .monospaced))
+					.lineLimit(2)
+			}
+		}
+		.opacity(included ? 1 : 0.4)
+		.padding(.bottom, 2)
+	}
+
+	/// Whether a group is part of the level currently picked.
+	private func isIncluded(_ group: CleanupGroup) -> Bool {
+		switch store.hexSettings.cleanupLevel {
+		case .off: false
+		case .light: group.minimumLevel == .light
+		case .full: true
+		}
+	}
+
 	private var outputFormattingSection: some View {
 		VStack(alignment: .leading, spacing: 10) {
 			Text("Output formatting")
@@ -244,12 +361,24 @@ struct WordRemappingsView: View {
 		)
 	}
 
+	/// A receipt for the preview, so it is obvious which stage changed something.
+	private var previewCleanupNote: String? {
+		var output = store.remappingScratchpadText
+		if store.hexSettings.wordRemovalsEnabled {
+			output = WordRemovalApplier.apply(output, removals: store.hexSettings.wordRemovals)
+		}
+		output = WordRemappingApplier.apply(output, remappings: store.hexSettings.wordRemappings)
+		let cleaned = TranscriptCleanup.clean(output, level: store.hexSettings.cleanupLevel)
+		return cleaned.hasChanges ? "Cleanup: \(cleaned.summary.sentence)" : nil
+	}
+
 	private var previewText: String {
 		var output = store.remappingScratchpadText
 		if store.hexSettings.wordRemovalsEnabled {
 			output = WordRemovalApplier.apply(output, removals: store.hexSettings.wordRemovals)
 		}
 		output = WordRemappingApplier.apply(output, remappings: store.hexSettings.wordRemappings)
+		output = TranscriptCleanup.clean(output, level: store.hexSettings.cleanupLevel).text
 		output = TranscriptFormattingApplier.apply(
 			output,
 			lowercase: store.hexSettings.lowercaseTranscripts,

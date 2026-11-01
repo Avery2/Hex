@@ -46,6 +46,9 @@ struct TranscriptionFeature {
     /// whatever app you ended up in — and it is kept here rather than read back out of history,
     /// because it has to work when history is turned off.
     var lastTranscript: String?
+    /// The same words before cleanup. Kept so the bar can show what was removed, and put any of it
+    /// back, instead of asking you to trust the tidy version.
+    var lastTranscriptRaw: String?
     /// Set when the finished bar is dismissed with ×, so a transcription still in flight does not
     /// bring the bar straight back after you said you were done with it.
     var resultDismissed: Bool = false
@@ -93,8 +96,9 @@ struct TranscriptionFeature {
 
     /// Take the finished bar off screen now instead of waiting for it to expire.
     case dismissResult
-    /// Paste what this take transcribed into whatever app is in front now.
-    case pasteResult
+    /// Paste what this take transcribed into whatever app is in front now. `text` is what the bar
+    /// is showing, which may include words the user put back; nil means "as transcribed".
+    case pasteResult(text: String?)
 
     // Transcription result flow
     case transcribe(URL, TimeInterval, TranscriptStatus)
@@ -166,8 +170,8 @@ struct TranscriptionFeature {
           .cancel(id: CancelID.recordingFailure)
         )
 
-      case .pasteResult:
-        guard let text = state.lastTranscript, !text.isEmpty else { return .none }
+      case let .pasteResult(text):
+        guard let text = (text ?? state.lastTranscript), !text.isEmpty else { return .none }
         // Pasting is the end of this take as far as the bar is concerned.
         state.sessionSummary = nil
         state.resultDismissed = true
@@ -537,6 +541,7 @@ private extension TranscriptionFeature {
     state.sessionSummary = nil
     state.recordingFailure = nil
     state.lastTranscript = nil
+    state.lastTranscriptRaw = nil
     state.resultDismissed = false
     
     // Capture the active application
@@ -784,12 +789,22 @@ private extension TranscriptionFeature {
       if remappedResult != output {
         transcriptionFeatureLogger.info("Applied \(remappings.count) word remapping(s)")
       }
+      // Tidy what was said before formatting, so a level that adds punctuation is not undone by a
+      // preference that strips it.
+      let cleaned = TranscriptCleanup.clean(remappedResult, level: state.hexSettings.cleanupLevel)
+      if cleaned.hasChanges {
+        transcriptionFeatureLogger.info("Cleaned transcript: \(cleaned.summary.sentence, privacy: .public)")
+        state.lastTranscriptRaw = remappedResult
+      } else {
+        state.lastTranscriptRaw = nil
+      }
+
       let formattedResult = TranscriptFormattingApplier.apply(
-        remappedResult,
+        cleaned.text,
         lowercase: state.hexSettings.lowercaseTranscripts,
         removePunctuation: state.hexSettings.removePunctuation
       )
-      if formattedResult != remappedResult {
+      if formattedResult != cleaned.text {
         transcriptionFeatureLogger.info("Applied paste formatting")
       }
       modifiedResult = formattedResult
@@ -956,6 +971,12 @@ private extension TranscriptionFeature {
       FileManager.default.removeItemIfExists(at: audioURL)
     }
 
+    // The shelf only gets tidied when it is over budget, and this is the natural moment to look.
+    Task.detached(priority: .background) {
+        @Shared(.hexSettings) var settings: HexSettings
+        await AudioMaintenance.run(history: transcriptionHistory, budget: settings.audioBudget)
+    }
+
     guard status.wasPasted else { return }
     await pasteboard.paste(result)
     soundEffect.play(.pasteTranscript)
@@ -1081,13 +1102,15 @@ struct TranscriptionView: View {
       isTranscribing: store.isTranscribing,
       canPaste: store.lastTranscript?.isEmpty == false,
       transcript: store.lastTranscript,
+      transcriptRaw: store.lastTranscriptRaw,
+      cleanupLevel: store.hexSettings.cleanupLevel,
       // Finish pastes, exactly as stopping with the hotkey does. Cancel keeps the audio and the
       // transcript but leaves it out of the frontmost app, which is the decision Escape used to
       // make — and can no longer make by accident. Both go through the `FromBar` actions: a click
       // ends the take without the hotkey ever being released, and the hotkey monitor has to know.
       onCancel: { store.send(.cancelFromBar) },
       onFinish: { store.send(.finishFromBar) },
-      onPaste: { store.send(.pasteResult) },
+      onPaste: { text in store.send(.pasteResult(text: text)) },
       onDismiss: { store.send(.dismissResult) },
       onInteractiveChanged: onInteractiveChanged,
       onBarSizeChanged: onBarSizeChanged

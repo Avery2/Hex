@@ -77,7 +77,7 @@ final class RecordingBarActionTests: XCTestCase {
     }
     store.exhaustivity = .off
 
-    await store.send(.pasteResult)
+    await store.send(.pasteResult(text: nil))
     await store.finish()
 
     let pasted = await probe.text
@@ -100,7 +100,7 @@ final class RecordingBarActionTests: XCTestCase {
     }
     store.exhaustivity = .off
 
-    await store.send(.pasteResult)
+    await store.send(.pasteResult(text: nil))
     await store.finish()
 
     let pasted = await probe.text

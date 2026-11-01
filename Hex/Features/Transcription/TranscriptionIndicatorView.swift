@@ -61,13 +61,18 @@ struct TranscriptionIndicatorView: View {
   var canPaste: Bool = false
   /// What this take transcribed to, for the bar to open out and show in full.
   var transcript: String?
+  /// The same words before cleanup, so the bar can show what was removed and put it back.
+  var transcriptRaw: String?
+  /// The level that produced `transcript`, for labelling the change honestly.
+  var cleanupLevel: CleanupLevel = .light
 
   /// Stop and keep the audio, but do not paste it.
   var onCancel: () -> Void = {}
   /// Stop and paste what was said.
   var onFinish: () -> Void = {}
-  /// Paste this take into whatever app is in front now.
-  var onPaste: () -> Void = {}
+  /// Paste this take into whatever app is in front now — the text as shown, including anything
+  /// the user put back.
+  var onPaste: (String) -> Void = { _ in }
   /// Take the finished bar off screen now rather than waiting for it to expire.
   var onDismiss: () -> Void = {}
   /// Told whether the bar is on screen: only then may its window take clicks.
@@ -78,6 +83,9 @@ struct TranscriptionIndicatorView: View {
   /// The finished transcript is folded away until you ask for it: the bar is meant to be glanceable,
   /// and only a session you care about is worth the screen space of the whole thing.
   @State private var isShowingTranscript = false
+  /// Removed words the user put back, keyed by the removed text so one tap restores every place the
+  /// same filler was cut ("like," twelve times means one chip, not twelve).
+  @State private var restored: Set<String> = []
 
   private var isVisible: Bool { status != .hidden }
 
@@ -215,18 +223,7 @@ struct TranscriptionIndicatorView: View {
         Rectangle()
           .fill(Color.white.opacity(0.08))
           .frame(height: 1)
-
-        // Selectable, so the text is still yours to take by hand if Paste goes somewhere odd.
-        ScrollView {
-          Text(transcript)
-            .font(.system(size: 12))
-            .foregroundStyle(.white.opacity(0.9))
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 15)
-            .padding(.vertical, 10)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        transcriptPanel(transcript)
       }
     }
     .frame(
@@ -345,7 +342,7 @@ struct TranscriptionIndicatorView: View {
             title: "Paste",
             accessibilityLabel: "Paste this transcript",
             isPrimary: true,
-            action: onPaste
+            action: { onPaste(visibleTranscript) }
           )
         }
         BarChip(systemImage: "xmark", accessibilityLabel: "Dismiss", action: onDismiss)
@@ -353,6 +350,113 @@ struct TranscriptionIndicatorView: View {
     case .hidden, .optionKeyPressed, .transcribing, .prewarming:
       EmptyView()
     }
+  }
+
+  /// The opened transcript: the text you would paste, and what cleanup took out of it.
+  ///
+  /// Removals are shown as struck words in place (so the sentence still reads) and as one chip per
+  /// distinct removal, so putting a word back is a single tap rather than a hunt through a diff.
+  @ViewBuilder private func transcriptPanel(_ transcript: String) -> some View {
+    let raw = transcriptRaw ?? transcript
+    let segments = TranscriptDiff.segments(raw: raw, cleaned: transcript)
+    let removedSegments = segments.filter { $0.kind == .removed }
+    let removedTexts = distinctRemovedTexts(removedSegments)
+
+    ScrollView {
+      VStack(alignment: .leading, spacing: 8) {
+        Text(styledTranscript(segments))
+          .font(.system(size: 12))
+          .textSelection(.enabled)
+          .frame(maxWidth: .infinity, alignment: .leading)
+
+        if !removedTexts.isEmpty {
+          HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+              .font(.system(size: 9))
+            Text(summaryLine(removedTexts.count))
+              .font(.system(size: 10))
+            Spacer(minLength: 0)
+          }
+          .foregroundStyle(.white.opacity(0.4))
+
+          LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 84), spacing: 5, alignment: .leading)],
+            alignment: .leading,
+            spacing: 5
+          ) {
+            ForEach(removedTexts, id: \.self) { text in
+              Button {
+                if restored.contains(text) { restored.remove(text) } else { restored.insert(text) }
+              } label: {
+                Text(text)
+                  .font(.system(size: 10.5))
+                  .strikethrough(!restored.contains(text))
+                  .foregroundStyle(restored.contains(text) ? Color.white.opacity(0.9) : Color.white.opacity(0.45))
+                  .lineLimit(1)
+                  .padding(.horizontal, 7)
+                  .frame(height: 18)
+                  .background(Capsule().fill(Color.white.opacity(restored.contains(text) ? 0.16 : 0.07)))
+              }
+              .buttonStyle(.plain)
+              .help(restored.contains(text) ? "Put “\(text)” back" : "Remove “\(text)” again")
+            }
+          }
+        }
+      }
+      .padding(.horizontal, 15)
+      .padding(.vertical, 10)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  /// What Paste should send: the transcript with any put-back words re-inserted.
+  private var visibleTranscript: String {
+    guard let transcript, let raw = transcriptRaw else { return transcript ?? "" }
+    let segments = TranscriptDiff.segments(raw: raw, cleaned: transcript)
+    let restoredIDs = Set(segments.filter { $0.kind == .removed && restored.contains(trimmed($0.text)) }.map(\.id))
+    return TranscriptDiff.text(segments, restoring: restoredIDs)
+  }
+
+  private func styledTranscript(_ segments: [TranscriptDiff.Segment]) -> AttributedString {
+    var attributed = AttributedString()
+    for segment in segments {
+      var piece = AttributedString(segment.text)
+      switch segment.kind {
+      case .kept:
+        piece.foregroundColor = .white.opacity(0.92)
+      case .removed:
+        if restored.contains(trimmed(segment.text)) {
+          piece.foregroundColor = .white.opacity(0.92)
+        } else {
+          piece.foregroundColor = .white.opacity(0.5)
+          piece.strikethroughStyle = .single
+        }
+      }
+      attributed.append(piece)
+    }
+    return attributed
+  }
+
+  private func distinctRemovedTexts(_ segments: [TranscriptDiff.Segment]) -> [String] {
+    var seen: Set<String> = []
+    var ordered: [String] = []
+    for segment in segments {
+      let text = trimmed(segment.text)
+      guard !text.isEmpty, !seen.contains(text) else { continue }
+      seen.insert(text)
+      ordered.append(text)
+    }
+    return ordered.sorted { $0.count > $1.count }
+  }
+
+  private func trimmed(_ text: String) -> String {
+    text.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func summaryLine(_ distinctRemovals: Int) -> String {
+    distinctRemovals == 1
+      ? "Cleaned one \(cleanupLevel == .full ? "edit" : "filler") — tap to put it back"
+      : "Cleaned \(distinctRemovals) kinds of \(cleanupLevel == .full ? "edit" : "filler") — tap to put any back"
   }
 
   private var background: some View {

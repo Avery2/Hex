@@ -99,6 +99,8 @@ struct SettingsFeature {
     case setSelectedMicrophoneID(String?)
     case setSoundEffectsEnabled(Bool)
     case setSoundEffectsVolume(Double)
+    case setCleanupLevel(CleanupLevel)
+    case setAudioBudget(AudioAgingPolicy.Budget)
 
     // Permission delegation (forwarded to AppFeature)
     case requestMicrophone
@@ -470,6 +472,14 @@ struct SettingsFeature {
 
       case let .setUseClipboardPaste(enabled):
         state.$hexSettings.withLock { $0.useClipboardPaste = enabled }
+        return .none
+
+      case let .setCleanupLevel(level):
+        state.$hexSettings.withLock { $0.cleanupLevel = level }
+        return .none
+
+      case let .setAudioBudget(budget):
+        state.$hexSettings.withLock { $0.audioBudget = budget }
         return .none
 
       case let .setCopyToClipboard(enabled):

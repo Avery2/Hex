@@ -50,6 +50,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemappings: [WordRemapping]
 	public var lowercaseTranscripts: Bool
 	public var removePunctuation: Bool
+	public var cleanupLevel: CleanupLevel
+	public var audioBudget: AudioAgingPolicy.Budget
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
@@ -84,7 +86,9 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
 		wordRemappings: [WordRemapping] = [],
 		lowercaseTranscripts: Bool = false,
-		removePunctuation: Bool = false
+		removePunctuation: Bool = false,
+		cleanupLevel: CleanupLevel = .light,
+		audioBudget: AudioAgingPolicy.Budget = .fourGigabytes
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -113,6 +117,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemappings = wordRemappings
 		self.lowercaseTranscripts = lowercaseTranscripts
 		self.removePunctuation = removePunctuation
+		self.cleanupLevel = cleanupLevel
+		self.audioBudget = audioBudget
 		normalizeDoubleTapSettings()
 	}
 
@@ -164,6 +170,8 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemappings
 	case lowercaseTranscripts
 	case removePunctuation
+	case cleanupLevel
+	case audioBudget
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -299,6 +307,8 @@ private enum HexSettingsSchema {
 			default: defaults.wordRemappings
 		).eraseToAny(),
 		SettingsField(.lowercaseTranscripts, keyPath: \.lowercaseTranscripts, default: defaults.lowercaseTranscripts).eraseToAny(),
-		SettingsField(.removePunctuation, keyPath: \.removePunctuation, default: defaults.removePunctuation).eraseToAny()
+		SettingsField(.removePunctuation, keyPath: \.removePunctuation, default: defaults.removePunctuation).eraseToAny(),
+		SettingsField(.cleanupLevel, keyPath: \.cleanupLevel, default: defaults.cleanupLevel).eraseToAny(),
+		SettingsField(.audioBudget, keyPath: \.audioBudget, default: defaults.audioBudget).eraseToAny()
 	]
 }
