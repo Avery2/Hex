@@ -61,6 +61,8 @@ class AudioPlayerController: NSObject, AVAudioPlayerDelegate {
 
 	func play(url: URL) throws {
 		let player = try AVAudioPlayer(contentsOf: url)
+		// Listening counts as using it: the shelf ages takes from their last play, not just their date.
+		try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
 		player.delegate = self
 		self.player = player
 		player.play()

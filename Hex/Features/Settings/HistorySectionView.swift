@@ -10,6 +10,26 @@ struct HistorySectionView: View {
 	var body: some View {
 		Section {
 			Label {
+				Picker(
+					"Keep recordings under",
+					selection: Binding(
+						get: { store.hexSettings.audioBudget },
+						set: { store.send(.setAudioBudget($0)) }
+					)
+				) {
+					ForEach(AudioAgingPolicy.Budget.allCases, id: \.self) { budget in
+						Text(budget.label).tag(budget)
+					}
+				}
+				.pickerStyle(.menu)
+				Text("Saved takes are kept at 16-bit. Only when the shelf passes this size are the biggest, oldest ones re-encoded to AAC, so small and recent takes are never touched. Nothing is deleted.")
+			} icon: {
+				Image(systemName: "internaldrive")
+			}
+		}
+
+		Section {
+			Label {
 				Toggle("Save Transcription History", isOn: Binding(
 					get: { store.hexSettings.saveTranscriptionHistory },
 					set: { store.send(.toggleSaveTranscriptionHistory($0)) }

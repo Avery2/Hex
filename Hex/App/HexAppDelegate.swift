@@ -68,6 +68,14 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		// Then present main views
 		presentRecordingBar()
 
+		// And once, quietly: if the recordings shelf has outgrown its budget, start bringing it back
+		// (lossless halving first, then the biggest oldest takes).
+		Task.detached(priority: .background) {
+			@Shared(.transcriptionHistory) var history: TranscriptionHistory
+			@Shared(.hexSettings) var settings: HexSettings
+			await AudioMaintenance.run(history: $history, budget: settings.audioBudget)
+		}
+
 		guard shouldOpenForegroundUIOnLaunch else {
 			appLogger.notice("Suppressing foreground windows for login launch")
 			return

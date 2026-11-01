@@ -1,5 +1,8 @@
 import Dependencies
 import Foundation
+import os
+
+private let persistenceLogger = Logger(subsystem: HexLog.subsystem, category: "Persistence")
 
 public struct TranscriptPersistenceClient: Sendable {
     public var save: @Sendable (
@@ -32,6 +35,17 @@ extension TranscriptPersistenceClient: DependencyKey {
                     attempt += 1
                 }
                 try fm.moveItem(at: audioURL, to: finalURL)
+
+                // The take is safe on disk and transcribed, so it can be stored compactly: 16-bit
+                // instead of 32-bit float halves the recording with nothing audible lost. A failure
+                // here leaves the float file exactly as it was.
+                do {
+                    if let compacted = try? WavCompactor.compactTo16Bit(at: finalURL) {
+                        persistenceLogger.info(
+                            "Stored recording at 16-bit: \(compacted.bytesBefore / 1024) KB -> \(compacted.bytesAfter / 1024) KB"
+                        )
+                    }
+                }
 
                 return Transcript(
                     timestamp: Date(),
