@@ -407,6 +407,24 @@ actor RecordingClientLive {
   private let (audioSamplesStream, audioSamplesContinuation) = AsyncStream<[Float]>.makeStream(
     bufferingPolicy: .bufferingNewest(64)
   )
+  /// Carries the rebuild's error back across the queue boundary.
+  private final class CaptureRebuildOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Error?
+
+    var error: Error? {
+      lock.lock()
+      defer { lock.unlock() }
+      return stored
+    }
+
+    func store(_ error: Error) {
+      lock.lock()
+      defer { lock.unlock() }
+      stored = error
+    }
+  }
+
   /// Write failures, surfaced to the UI the moment they happen rather than at stop.
   ///
   /// Bounded: a failing disk produces one of these per buffer, and the user only needs the
@@ -429,6 +447,9 @@ actor RecordingClientLive {
       recordingFailureContinuation.yield(message)
     }
   )
+  /// Set when a capture rebuild never came back. CoreAudio is left alone for the rest of the
+  /// process's life rather than given a second chance to hang the recorder.
+  private var captureEngineIsWedged = false
   private var captureControllerDeviceID: AudioDeviceID?
   private var captureControllerNeedsRestartReason: String?
   private var notificationObservers: [NSObjectProtocol] = []
@@ -667,6 +688,53 @@ actor RecordingClientLive {
     audioHardwareObservers.removeAll()
   }
 
+  /// How long a mid-recording engine rebuild is allowed to take before the take is written off.
+  private static let captureRebuildDeadline: DispatchTimeInterval = .seconds(3)
+
+  /// A rebuild that never came back because CoreAudio stopped answering.
+  enum CaptureRebuildFailure: LocalizedError {
+    case timedOut
+
+    var errorDescription: String? {
+      "The microphone stopped responding, so recording had to end."
+    }
+  }
+
+  /// Runs the mid-recording engine rebuild off this actor and waits for it only briefly.
+  ///
+  /// A rebuild touches CoreAudio, and a driver that stops answering mid-call never returns — the
+  /// call cannot be cancelled. On 2026-10-25 one wedged inside `AVAudioEngine.inputNode` and, because
+  /// it ran on this actor, every later call queued behind it, including `stopRecording()`: the bar
+  /// spun on "transcribing" for a take that had never reached the transcriber.
+  ///
+  /// Blocking rather than `await`ing is deliberate — `handleCaptureEnvironmentChange` snapshots
+  /// recording state and must not be reentered while it acts on that snapshot (see below). What is
+  /// new is that the wait is *bounded*: the wedged call is left on its own thread, where it can no
+  /// longer take the recorder down with it.
+  private func rebuildCaptureEngine(reason: String) throws {
+    let controller = captureController
+    let outcome = CaptureRebuildOutcome()
+    let finished = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer { finished.signal() }
+      do {
+        try controller.restartPreservingRecording(reason: reason)
+      } catch {
+        outcome.store(error)
+      }
+    }
+
+    guard finished.wait(timeout: .now() + Self.captureRebuildDeadline) == .success else {
+      captureEngineIsWedged = true
+      recordingLogger.fault(
+        "Capture rebuild did not come back within the deadline; abandoning that thread and disabling capture for this launch reason=\(reason) (sample this process to inspect the wedged call)"
+      )
+      throw CaptureRebuildFailure.timedOut
+    }
+    if let error = outcome.error { throw error }
+  }
+
   /// Synchronous on purpose: no awaits means no actor reentrancy, so the recording-state
   /// snapshot below cannot go stale while this method runs.
   private func handleCaptureEnvironmentChange(reason: String) {
@@ -697,7 +765,7 @@ actor RecordingClientLive {
         // stale engine "running" against the old route silently captured nothing for the
         // rest of the recording (#251, #252, #218, #226).
         do {
-          try captureController.restartPreservingRecording(reason: reason)
+          try rebuildCaptureEngine(reason: reason)
           captureControllerDeviceID = activeInputDevice
           captureControllerNeedsRestartReason = nil
           deferredCaptureRestartReason = nil
@@ -709,6 +777,12 @@ actor RecordingClientLive {
           recordingLogger.error(
             "Mid-recording capture engine rebuild failed reason=\(reason): \(error.localizedDescription); deferring restart"
           )
+          if error is CaptureRebuildFailure {
+            // Capture is gone and the engine will not come back on its own. End the take now and
+            // say why, instead of letting the bar claim a microphone that stopped answering while
+            // the rest of the recording gathers nothing.
+            recordingFailureContinuation.yield("The microphone stopped responding")
+          }
         }
       }
       deferredCaptureRestartReason = reason
@@ -803,8 +877,11 @@ actor RecordingClientLive {
   /// recording was running.
   private func finalizeCaptureStateAfterRecording() {
     if let deferredCaptureRestartReason {
-      recordingLogger.notice("Applying deferred capture restart reason=\(deferredCaptureRestartReason)")
-      handleCaptureEnvironmentChange(reason: "deferred-\(deferredCaptureRestartReason)")
+      // Queued, never applied inline: this runs inside `stopRecording()`, before the captured file
+      // is handed to the transcriber. A rebuild here that touches a wedged CoreAudio plugin hung
+      // the whole stop on 2026-10-25, so it goes through the debounced, bounded path instead.
+      recordingLogger.notice("Queueing deferred capture restart reason=\(deferredCaptureRestartReason)")
+      enqueueCaptureEnvironmentChange(reason: "deferred-\(deferredCaptureRestartReason)")
     }
     if isCaptureSuspended {
       tearDownWarmCapture(reason: "post-recording-suspend")
@@ -1094,6 +1171,15 @@ actor RecordingClientLive {
     reason: String,
     forceRestart: Bool = false
   ) throws {
+    // After a rebuild that never came back, CoreAudio in this process cannot be trusted: every
+    // further call into it is another chance to hang the recorder, including from inside
+    // `stopRecording()`. Fail fast and say so; a relaunch clears it.
+    guard !captureEngineIsWedged else {
+      recordingLogger.fault(
+        "Refusing to touch the capture engine after an earlier rebuild wedged; relaunch Hex to re-enable capture reason=\(reason)"
+      )
+      throw CaptureRebuildFailure.timedOut
+    }
     if forceRestart || captureControllerDeviceID != deviceID {
       recordingLogger.notice(
         "Restarting capture engine reason=\(reason) previousInput=\(self.describeDevice(self.captureControllerDeviceID)) newInput=\(self.describeDevice(deviceID)) force=\(forceRestart)"
